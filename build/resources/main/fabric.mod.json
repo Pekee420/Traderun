@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "traderun",
+  "version": "1.0.1",
+  "name": "Traderun",
+  "description": "Automatic villager trading hall automation. Features: Multi-floor trading, auto-restocking from input chests, auto-dumping to output chests, smart cooldowns (day/night aware), profession filtering. Requires Baritone for pathfinding. Set up your AutoTrade whitelist before using!",
+  "authors": ["Pekee"],
+  "license": "AGPL-3.0-or-later",
+  "icon": "assets/traderun/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.example.traderun.TradeRunClient"
+    ]
+  },
+  "mixins": [
+    "traderun.mixins.json"
+  ],
+  "depends": {
+    "minecraft": "1.21.4",
+    "java": ">=21",
+    "fabricloader": ">=0.15.0",
+    "fabric-api": "*"
+  },
+  "recommends": {
+    "baritone": "*"
+  },
+  "suggests": {
+    "modmenu": "*",
+    "cloth-config2": "*"
+  },
+  "contact": {
+    "sources": "https://github.com/pekee/traderun"
+  }
+}
+

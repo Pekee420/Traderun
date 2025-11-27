@@ -1,0 +1,14 @@
+{
+  "mappings": {
+    "com/example/traderun/mixin/ParticlePacketMixin": {
+      "onParticle": "Lnet/minecraft/class_634;method_11077(Lnet/minecraft/class_2675;)V"
+    }
+  },
+  "data": {
+    "named:intermediary": {
+      "com/example/traderun/mixin/ParticlePacketMixin": {
+        "onParticle": "Lnet/minecraft/class_634;method_11077(Lnet/minecraft/class_2675;)V"
+      }
+    }
+  }
+}

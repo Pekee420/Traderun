@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "package": "com.example.traderun.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "ParticlePacketMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
+
+
