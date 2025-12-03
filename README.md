@@ -57,7 +57,7 @@ Look at your **output chest** (items you get FROM villagers) and run:
 /traderun storage set output
 ```
 
-**💡 Tip:** After setting storage, just open the chest and the mod automatically learns what item to look for from the first slot!
+**💡 IMPORTANT:** After setting storage, just open the chest and the mod automatically learns what item to look for from the first slot!
 
 ### 3. Register Your Floors
 Stand on a floor with villagers and run:
