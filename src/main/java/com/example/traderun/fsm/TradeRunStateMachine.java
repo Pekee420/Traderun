@@ -15,6 +15,7 @@ import com.example.traderun.util.DebugLogger;
 import com.example.traderun.villager.VillagerFinder;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ChatScreen;
+import net.minecraft.client.gui.screen.GameMenuScreen;
 import net.minecraft.client.gui.screen.ingame.MerchantScreen;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.item.Item;
@@ -66,7 +67,8 @@ public class TradeRunStateMachine {
 
     private static final long OPEN_TIMEOUT_MS = 7000L;
     private static final long APPROACH_TIMEOUT_MS = 8000L;
-    private static final long STORAGE_NAV_TIMEOUT_MS = 12000L;  // Longer timeout for storage runs
+    private static final long STORAGE_NAV_TIMEOUT_MS = 12000L;  // Total timeout for storage runs
+    private static final long STORAGE_RETRY_VIA_VILLAGER_MS = 8000L;  // Try via villager after 8s
 
     private static final long USE_PRESS_MS = 80L;
     private static final long AIM_DELAY_MS = 80L;
@@ -90,7 +92,7 @@ public class TradeRunStateMachine {
 
     // ===== Watchdogs =====
     private static final long RECOVER_NO_MOVE_MS = 2000L;
-    private static final long FAIL_NO_MOVE_MS = 5000L;
+    private static final long FAIL_NO_MOVE_MS = 30000L;  // 30 seconds before hard fail (was 5s)
     private static final double MOVE_EPS_SQ = 0.05 * 0.05;
 
     private Vec3d lastMovePos = null;
@@ -135,11 +137,22 @@ public class TradeRunStateMachine {
     private static final long STUCK_CHECK_INTERVAL_MS = 1500L;
     private static final double STUCK_MIN_MOVEMENT_SQ = 0.1 * 0.1; // Must move at least 0.1 blocks
     private static final int STUCK_FAIL_THRESHOLD = 2; // Fail after 2 consecutive stuck checks (3 seconds)
+    
+    // Global stuck detection - stop mod if completely stuck for 2 minutes
+    private static final long GLOBAL_STUCK_TIMEOUT_MS = 120_000L; // 2 minutes
+    private static final double GLOBAL_STUCK_MIN_MOVE_SQ = 2.0 * 2.0; // Must move at least 2 blocks
+    private long globalStuckCheckMs = 0L;
+    private Vec3d globalStuckCheckPos = null;
+    private int globalStuckVillagerRetries = 0;
+    private static final int GLOBAL_STUCK_MAX_VILLAGER_RETRIES = 5; // Try 5 different villagers before giving up
 
     private boolean useKeyHeld = false;
     private long lastUseToggleMs = 0L;
 
     private boolean forwardKeyForced = false;
+    
+    // Track if ESC menu should be restored after interaction
+    private boolean restoreEscMenu = false;
 
     private long firstOpenAttemptMs = 0L;
     private long lastAimMs = 0L;
@@ -180,6 +193,35 @@ public class TradeRunStateMachine {
         if (c != null && c.player != null) c.player.sendMessage(Text.literal("[traderun] " + msg), false);
     }
     
+    /** Show a big title on screen */
+    private void showTitle(MinecraftClient c, String title, String subtitle) {
+        if (c == null || c.player == null) return;
+        // Send title via chat command (works reliably)
+        c.player.sendMessage(Text.literal(""), false);  // Clear line
+        c.player.sendMessage(Text.literal("§a§l" + title), false);
+        if (subtitle != null && !subtitle.isEmpty()) {
+            c.player.sendMessage(Text.literal("§7" + subtitle), false);
+        }
+        c.player.sendMessage(Text.literal(""), false);  // Clear line
+        // Also show in hotbar
+        status(c, "§a" + title + " §7- " + (subtitle != null ? subtitle : ""));
+    }
+    
+    /** Check if a blocking screen is open (not ESC menu, which we allow for AFK) */
+    private boolean hasBlockingScreen(MinecraftClient c) {
+        if (c.currentScreen == null) return false;
+        if (c.currentScreen instanceof GameMenuScreen) return false;  // Allow ESC menu
+        if (c.currentScreen instanceof MerchantScreen) return false;  // We handle this
+        return true;
+    }
+    
+    /** Check if we're in a container screen (for container logic) */
+    private boolean hasContainerScreen(MinecraftClient c) {
+        if (c.currentScreen == null) return false;
+        if (c.currentScreen instanceof GameMenuScreen) return false;  // ESC menu is not a container
+        return true;
+    }
+    
     /** Show short status in hotbar/actionbar */
     private void status(MinecraftClient c, String msg) {
         if (c != null && c.player != null) c.player.sendMessage(Text.literal("§7" + msg), true);
@@ -208,6 +250,9 @@ public class TradeRunStateMachine {
     }
 
     public void startForProfession(String professionKey) {
+        // CRITICAL: Configure Baritone safety settings on every start
+        navigator.forceConfigureBaritone();
+        
         villagerFinder.setTargetProfessionId(professionKey);
         InteractedVillagerRegistry.clear();
         RecentFailRegistry.fullReset();  // Full reset on new start
@@ -231,7 +276,10 @@ public class TradeRunStateMachine {
         state = State.SEEK;
         arrivedOnFloorMs = System.currentTimeMillis();
         dbg("start(" + professionKey + ") primaryFloorY=" + primaryFloorY);
-        say(MinecraftClient.getInstance(), "started (" + professionKey + ")");
+        
+        MinecraftClient client = MinecraftClient.getInstance();
+        showTitle(client, "⚡ TRADERUN STARTED", "Sneak (Shift) to stop");
+        say(client, "Trading: " + professionKey);
     }
     
     public void startForProfessions(java.util.List<String> professions) {
@@ -239,82 +287,85 @@ public class TradeRunStateMachine {
         DebugLogger.log("=== TRADERUN START ===");
         DebugLogger.log("Professions: " + professions);
         
-        InteractedVillagerRegistry.clear();
-        RecentFailRegistry.fullReset();  // Full reset on new start
-
-        resetAllTransient();
-        nextRestockAllowedMs = 0L;
-        lastRestockNoticeMs = 0L;
-
         MinecraftClient client = MinecraftClient.getInstance();
         String profsStr = String.join(", ", professions);
         
-        // Build floor names list from professions that have registered floors with storage
+        // REQUIRE floors to be registered - no fallback behavior!
         activeFloorNames.clear();
         List<FloorRegistry.FloorInfo> matchingFloors = new ArrayList<>();
         java.util.Set<Integer> seenFloorYs = new java.util.HashSet<>();
+        List<String> missingFloors = new ArrayList<>();
+        
         for (String prof : professions) {
             Optional<FloorRegistry.FloorInfo> floorInfo = FloorRegistry.getFloorByName(prof);
             if (floorInfo.isPresent()) {
                 FloorRegistry.FloorInfo f = floorInfo.get();
                 // Check if floor has storage
                 if (StorageRegistry.hasStorageForFloor(f.y) && seenFloorYs.add(f.y)) {
-                    // Use floor name if set, otherwise use profession
                     String floorName = (f.name != null && !f.name.isEmpty()) ? f.name : prof;
                     activeFloorNames.add(floorName);
                     matchingFloors.add(f);
-                } else if (StorageRegistry.hasStorageForFloor(f.y)) {
-                    dbg("start: skipping duplicate floor for profession " + prof + " at Y=" + f.y);
+                } else if (!StorageRegistry.hasStorageForFloor(f.y)) {
+                    missingFloors.add(prof + " (no storage at Y=" + f.y + ")");
                 }
+            } else {
+                missingFloors.add(prof + " (not registered)");
             }
         }
+        
+        // STRICT: If no floors found, STOP and tell user to register
+        if (matchingFloors.isEmpty()) {
+            say(client, "§c⚠ No floors registered for: " + profsStr);
+            say(client, "§eRegister floors first:");
+            say(client, "§7  1. Stand on the floor with your villagers");
+            say(client, "§7  2. Run: /traderun floor add <profession>");
+            say(client, "§7  3. Set storage: /traderun storage set input");
+            say(client, "§7  4. Set storage: /traderun storage set output");
+            if (!missingFloors.isEmpty()) {
+                say(client, "§cMissing: " + String.join(", ", missingFloors));
+            }
+            return;  // DON'T START without proper setup
+        }
+        
+        // CRITICAL: Configure Baritone safety settings on every start
+        navigator.forceConfigureBaritone();
+        
+        InteractedVillagerRegistry.clear();
+        RecentFailRegistry.fullReset();  // Full reset on new start
+
+        resetAllTransient();
+        nextRestockAllowedMs = 0L;
+        lastRestockNoticeMs = 0L;
         currentFloorIndex = 0;
         
         dbg("Built activeFloorNames from professions: " + activeFloorNames);
         
-        // Find the primary floor for storage lookups (from registered floors)
-        primaryFloorY = null;
-        FloorRegistry.FloorInfo firstFloor = null;
-        if (!matchingFloors.isEmpty()) {
-            firstFloor = matchingFloors.get(0);
-            primaryFloorY = firstFloor.y;
-            // Set professions for ONLY the first floor
-            villagerFinder.setTargetProfessions(new ArrayList<>(firstFloor.professions));
-            villagerFinder.setTargetFloorY(firstFloor.y);
-            dbg("Primary floor Y set to " + primaryFloorY + " with profs=" + firstFloor.professions);
-        } else {
-            // No matching floors - use all professions
-            villagerFinder.setTargetProfessions(professions);
-            villagerFinder.setTargetFloorY(null); // Use player Y as fallback
+        // Set up for first floor - STRICTLY use that floor's professions and Y level
+        FloorRegistry.FloorInfo firstFloor = matchingFloors.get(0);
+        primaryFloorY = firstFloor.y;
+        
+        // STRICT: Only target the professions registered for this floor
+        villagerFinder.setTargetProfessions(new ArrayList<>(firstFloor.professions));
+        villagerFinder.setTargetFloorY(firstFloor.y);
+        dbg("Primary floor Y set to " + primaryFloorY + " with profs=" + firstFloor.professions);
+        
+        // Warn about missing floors
+        if (!missingFloors.isEmpty()) {
+            say(client, "§eSkipped (missing setup): " + String.join(", ", missingFloors));
         }
         
-        // Fallback: find ANY floor with storage if no registered floor found
-        if (primaryFloorY == null) {
-            int refY = (client != null && client.player != null) ? client.player.getBlockPos().getY() : 64;
-            Optional<Integer> anyFloorY = StorageRegistry.getAnyFloorWithBothStorage(refY);
-            if (anyFloorY.isPresent()) {
-                primaryFloorY = anyFloorY.get();
-                dbg("Primary floor Y set to " + primaryFloorY + " (from storage registry fallback)");
-            } else {
-                // Last resort - use player's current Y
-                if (client != null && client.player != null) {
-                    primaryFloorY = client.player.getBlockPos().getY();
-                    dbg("Primary floor Y set to player Y=" + primaryFloorY + " (no registered floor or storage)");
-                }
-            }
-        }
-        
-        // Check if we need to navigate to a registered floor for this profession
-        if (client != null && client.player != null && firstFloor != null) {
+        // Check if we need to navigate to the floor
+        if (client != null && client.player != null) {
             int playerY = client.player.getBlockPos().getY();
             
             if (Math.abs(firstFloor.y - playerY) > 1) {
                 // Not on the right floor - set up floor transition
                 targetFloorY = firstFloor.y;
                 BlockPos target = new BlockPos(firstFloor.clusterX, firstFloor.y, firstFloor.clusterZ);
-                say(client, "started (" + profsStr + ") - navigating to floor Y=" + firstFloor.y);
+                showTitle(client, "⚡ TRADERUN STARTED", "Sneak (Shift) to stop");
+                say(client, "Trading: " + profsStr + " - navigating to floor Y=" + firstFloor.y);
                 dbg("start(" + profsStr + ") - need floor Y=" + firstFloor.y + ", at Y=" + playerY);
-                floorTransitionStartY = client.player != null ? client.player.getBlockPos().getY() : firstFloor.y;
+                floorTransitionStartY = client.player.getBlockPos().getY();
                 floorTransitionStartMs = System.currentTimeMillis();
                 state = State.FLOOR_TRANSITION;
                 floorTransitionPhase = 0;
@@ -326,7 +377,9 @@ public class TradeRunStateMachine {
         state = State.SEEK;
         arrivedOnFloorMs = System.currentTimeMillis();
         dbg("start(" + profsStr + ")");
-        say(client, "started (" + profsStr + ")");
+        
+        showTitle(client, "⚡ TRADERUN STARTED", "Sneak (Shift) to stop");
+        say(client, "Trading: " + profsStr);
         if (activeFloorNames.size() > 1) {
             say(client, "Multi-floor mode: " + String.join(", ", activeFloorNames));
         }
@@ -550,6 +603,45 @@ public class TradeRunStateMachine {
         return false;
     }
 
+    private Optional<FloorRegistry.FloorInfo> peekNextFloorInfo() {
+        if (activeFloorNames.isEmpty() || activeFloorNames.size() <= 1) {
+            return Optional.empty();
+        }
+
+        int startIndex = currentFloorIndex;
+        for (int i = 1; i <= activeFloorNames.size(); i++) {
+            int nextIndex = (startIndex + i) % activeFloorNames.size();
+            if (nextIndex == currentFloorIndex) continue;
+
+            String nextName = activeFloorNames.get(nextIndex);
+            Optional<FloorRegistry.FloorInfo> floorOpt = FloorRegistry.getFloorByName(nextName);
+            if (floorOpt.isEmpty()) continue;
+
+            FloorRegistry.FloorInfo floor = floorOpt.get();
+            if (!StorageRegistry.hasStorageForFloor(floor.y)) continue;
+
+            return Optional.of(floor);
+        }
+
+        return Optional.empty();
+    }
+
+    private boolean shouldHoldOutputForNextFloor(MinecraftClient client, Identifier outId) {
+        if (outId == null) return false;
+        if (client == null || client.player == null) return false;
+        if (activeFloorNames.isEmpty() || activeFloorNames.size() <= 1) return false;
+        if (!villagerFinder.isCurrentFloorExhausted(client)) return false;
+
+        Optional<FloorRegistry.FloorInfo> nextFloorOpt = peekNextFloorInfo();
+        if (nextFloorOpt.isEmpty()) return false;
+
+        int nextFloorY = nextFloorOpt.get().y;
+        Optional<Identifier> nextInputOpt = StorageRegistry.getRememberedItem(Role.INPUT, nextFloorY);
+        if (nextInputOpt.isEmpty()) return false;
+
+        return nextInputOpt.get().equals(outId);
+    }
+
     public void stop() {
         navigator.stop();
         releaseUseKey(MinecraftClient.getInstance());
@@ -598,6 +690,90 @@ public class TradeRunStateMachine {
             releaseForwardKey(client);
             return;
         }
+        
+        // Handle ESC menu pause - just release keys, don't stop navigation
+        boolean escOpen = client.currentScreen instanceof GameMenuScreen;
+        if (escOpen) {
+            // Release movement keys but DON'T stop navigation - let it resume when ESC closes
+            releaseUseKey(client);
+            releaseForwardKey(client);
+            // Don't call navigator.stop() - that wipes navigation state
+            return; // Skip processing this tick, mixin handles ESC auto-close
+        }
+        
+        // Queue detection - at 0,0 means waiting in server queue (10 block radius)
+        if (client.player != null) {
+            double px = client.player.getX();
+            double pz = client.player.getZ();
+            if (Math.abs(px) <= 10 && Math.abs(pz) <= 10) {
+                // At spawn/queue area - pause but don't stop
+                releaseUseKey(client);
+                releaseForwardKey(client);
+                navigator.stop();
+                statusThrottled(client, "⏳ Waiting in queue...");
+                return;
+            }
+        }
+        
+        // Global stuck detection - stop mod if stuck for 2 minutes
+        if (client.player != null) {
+            long now = System.currentTimeMillis();
+            Vec3d playerPos = client.player.getPos();
+            
+            if (globalStuckCheckPos == null) {
+                globalStuckCheckPos = playerPos;
+                globalStuckCheckMs = now;
+            } else {
+                double movedSq = playerPos.squaredDistanceTo(globalStuckCheckPos);
+                
+                if (movedSq >= GLOBAL_STUCK_MIN_MOVE_SQ) {
+                    // Made progress - reset stuck tracking
+                    globalStuckCheckPos = playerPos;
+                    globalStuckCheckMs = now;
+                    globalStuckVillagerRetries = 0;
+                } else if (now - globalStuckCheckMs >= GLOBAL_STUCK_TIMEOUT_MS) {
+                    // Stuck for 2 minutes - stop mod
+                    dbg("GLOBAL STUCK: No progress for 2 minutes, stopping mod");
+                    say(client, "§c⚠ Stuck for 2 minutes - cannot navigate. Check for obstacles!");
+                    abortHard(client);
+                    return;
+                } else if (now - globalStuckCheckMs >= 15_000L && globalStuckVillagerRetries < GLOBAL_STUCK_MAX_VILLAGER_RETRIES) {
+                    // Every 15s while stuck, try escape then different villager
+                    if (state == State.APPROACH || state == State.SEEK) {
+                        long timeSinceRetry = now - globalStuckCheckMs - (globalStuckVillagerRetries * 15_000L);
+                        if (timeSinceRetry >= 15_000L) {
+                            globalStuckVillagerRetries++;
+                            
+                            // First try: escape walk with Baritone (no Y limits)
+                            if (globalStuckVillagerRetries == 1 || globalStuckVillagerRetries == 3) {
+                                dbg("GLOBAL STUCK: Attempting escape walk (attempt " + globalStuckVillagerRetries + ")");
+                                say(client, "§eStuck - attempting escape walk...");
+                                
+                                BlockPos escapeTarget = navigator.escapeToNearby(client);
+                                if (escapeTarget != null) {
+                                    dbg("GLOBAL STUCK: Escaping to " + escapeTarget);
+                                    // Stay in current state - escape will help us get unstuck
+                                    return; // Skip the rest of tick to let escape proceed
+                                }
+                            }
+                            
+                            // If escape didn't work or on alternate attempts, try different villager
+                            dbg("GLOBAL STUCK: Trying different villager (attempt " + globalStuckVillagerRetries + ")");
+                            say(client, "§eStuck - trying different villager (" + globalStuckVillagerRetries + "/" + GLOBAL_STUCK_MAX_VILLAGER_RETRIES + ")");
+                            
+                            // Mark current target as temporarily failed and find another
+                            if (currentTarget != null) {
+                                RecentFailRegistry.markDiagonalFailure(currentTarget);
+                            }
+                            currentTarget = null;
+                            currentApproachGoal = null;
+                            navigator.stop();
+                            state = State.SEEK;
+                        }
+                    }
+                }
+            }
+        }
 
         // Shift to abort
         if (client.options != null && client.options.sneakKey != null && client.options.sneakKey.isPressed()) {
@@ -613,6 +789,9 @@ public class TradeRunStateMachine {
         
         // Tick direct walk fallback if Baritone isn't available
         navigator.tickDirectWalk(client);
+        
+        // Tick pending Baritone safety commands
+        navigator.tickBaritoneCommands();
 
         updateMovementWatch(client);
 
@@ -647,7 +826,7 @@ public class TradeRunStateMachine {
             
             // 2-second stall recovery (for APPROACH, DETOUR_DUMP, DETOUR_RESTOCK when navigating)
             boolean isNavigatingState = (state == State.APPROACH || state == State.DETOUR_DUMP || state == State.DETOUR_RESTOCK);
-            if (isNavigatingState && client.currentScreen == null) {
+            if (isNavigatingState && !hasBlockingScreen(client)) {
                 // For DETOUR states, also try recovery if goal not set yet (nav might have failed)
                 boolean hasGoal = currentApproachGoal != null;
                 boolean stillFarFromGoal = hasGoal && distSqToGoal(client, currentApproachGoal) > APPROACH_GOAL_RANGE_SQ;
@@ -663,8 +842,8 @@ public class TradeRunStateMachine {
             }
 
             // 5-second absolute timeout for ANY state - but NOT when a screen is open (we're in a container)
-            // Also skip if we have an active container session
-            boolean inContainerInteraction = (client.currentScreen != null) || (containerSession != null);
+            // Also skip if we have an active container session (ESC menu doesn't count)
+            boolean inContainerInteraction = hasContainerScreen(client) || (containerSession != null);
             if (firstStallMs > 0L && (now - firstStallMs) >= FAIL_NO_MOVE_MS && !inContainerInteraction) {
                 String failInfo = "FAIL 5s: state=" + state + " approach=" + approachKind +
                     " baritone=" + navigator.isBaritoneAvailable() + 
@@ -783,14 +962,26 @@ public class TradeRunStateMachine {
         lastMoveMs = System.currentTimeMillis();
         lastRecoverAttemptMs = 0L;
         firstStallMs = 0L;
+        
+        // Global stuck reset
+        globalStuckCheckMs = System.currentTimeMillis();
+        globalStuckCheckPos = null;
+        globalStuckVillagerRetries = 0;
         outputChestFull = false;
         inputChestEmpty = false;
         nextRestockCheckMs = 0L;
+        nextCooldownRestockMs = 0L;
+        shownCooldownHint = false;
+        allOnCooldownStartMs = 0L;
         waitStartMs = 0L;
         waitReason = null;
         emptyInputFloorSwitches = 0;
         emptyInputRotationCount = 0;
         emptyInputWaitCycles = 0;
+        floorReturnAttempts = 0;
+        storageRetryViaVillager = false;
+        storageRetryTarget = null;
+        floorTransitionRetryViaVillager = false;
 
         debugLines.clear();
         lastDbgState = null;
@@ -866,21 +1057,17 @@ public class TradeRunStateMachine {
         long now = System.currentTimeMillis();
         int floorY = currentFloorKeyY(client);
         
-        // Only dump output items if inventory is getting full (<=4 empty slots)
-        // Don't dump every time we restock - unnecessary trips if we have space
-        if (containerSession == null && currentChestPos == null) {
-            int emptySlots = InventoryOps.emptyMainSlots(client.player);
-            if (emptySlots <= 4 && !outputChestFull) {
-                Identifier outId = StorageRegistry.getRememberedItem(Role.OUTPUT, floorY).orElse(learnedOutputItemId);
-                if (outId != null) {
-                    int outCount = countItemById(client, outId);
-                    if (outCount > 0) {
-                        Optional<StorageRegistry.StoredLocation> outputLoc = StorageRegistry.getForY(Role.OUTPUT, floorY);
-                        if (outputLoc.isPresent()) {
-                            dbg("restock: inventory low (" + emptySlots + " empty), dumping " + outCount + " output first");
-                            state = State.DETOUR_DUMP;
-                            return;
-                        }
+        // Dump output items if we have more than 64 (1 stack) - do both input/output at same location
+        if (containerSession == null && currentChestPos == null && !outputChestFull) {
+            Identifier outId = StorageRegistry.getRememberedItem(Role.OUTPUT, floorY).orElse(learnedOutputItemId);
+            if (outId != null) {
+                int outCount = countItemById(client, outId);
+                if (outCount > 64) {
+                    Optional<StorageRegistry.StoredLocation> outputLoc = StorageRegistry.getForY(Role.OUTPUT, floorY);
+                    if (outputLoc.isPresent()) {
+                        dbg("restock: have " + outCount + " output items (>64), dumping while here");
+                        state = State.DETOUR_DUMP;
+                        return;
                     }
                 }
             }
@@ -1026,8 +1213,8 @@ public class TradeRunStateMachine {
             return;
         }
 
-        // No session yet - check if we can interact or if screen is already open
-        if (canInteractWithContainer(client, currentChestPos) || client.currentScreen != null) {
+        // No session yet - check if we can interact or if container screen is already open
+        if (canInteractWithContainer(client, currentChestPos) || hasContainerScreen(client)) {
             navigator.stop();
             
             // Face the target chest before interacting
@@ -1068,7 +1255,35 @@ public class TradeRunStateMachine {
 
         double dGoal = distSqToGoal(client, currentApproachGoal);
         if (dGoal > APPROACH_GOAL_RANGE_SQ) {
-            if (System.currentTimeMillis() - approachStartMs > STORAGE_NAV_TIMEOUT_MS) {
+            long elapsed = System.currentTimeMillis() - approachStartMs;
+            
+            // After 4s, try going to nearest villager first then retry
+            if (!storageRetryViaVillager && elapsed > STORAGE_RETRY_VIA_VILLAGER_MS) {
+                Optional<VillagerEntity> nearestVillager = villagerFinder.findAnyNearestVillager(client);
+                if (nearestVillager.isPresent()) {
+                    dbg("restock: stuck for 8s, going to villager first then retry");
+                    storageRetryViaVillager = true;
+                    storageRetryTarget = currentChestPos;
+                    BlockPos villagerGoal = navigator.gotoVillagerApproachPoint(client, nearestVillager.get());
+                    if (villagerGoal != null) {
+                        currentApproachGoal = villagerGoal;
+                        approachStartMs = System.currentTimeMillis(); // Reset timer for villager approach
+                        return;
+                    }
+                }
+            }
+            
+            // If we were retrying via villager and reached it, go back to storage
+            if (storageRetryViaVillager && dGoal < 4.0) {
+                dbg("restock: reached villager area, retrying storage navigation");
+                storageRetryViaVillager = false;
+                currentApproachGoal = navigator.gotoStoragePosition(client, storageRetryTarget);
+                storageRetryTarget = null;
+                approachStartMs = System.currentTimeMillis();
+                return;
+            }
+            
+            if (elapsed > STORAGE_NAV_TIMEOUT_MS) {
                 navigator.stop();
                 String dist = String.format("%.1f", Math.sqrt(dGoal));
                 dbg("restock nav timeout: couldn't reach input chest in 12s, dist=" + dist);
@@ -1077,6 +1292,8 @@ public class TradeRunStateMachine {
                 currentChestPos = null;
                 currentChestOpenSpot = null;
                 currentApproachGoal = null;
+                storageRetryViaVillager = false;
+                storageRetryTarget = null;
                 state = State.SEEK;
                 dbg("DETOUR_RESTOCK -> SEEK (nav timeout)");
             }
@@ -1102,8 +1319,14 @@ public class TradeRunStateMachine {
     private long dumpStartMs = 0L;
     private boolean outputChestFull = false; // Track if output chest is full - skip dumping and keep trading
     private boolean inputChestEmpty = false; // Track if input chest is empty - use wait mode
+    private boolean storageRetryViaVillager = false; // Retry storage via villager position
+    private BlockPos storageRetryTarget = null; // Original storage target for retry
     private long nextDumpAllowedMs = 0L; // Cooldown after dump attempt
     private long nextRestockCheckMs = 0L; // Cooldown after restock attempt when empty
+    private long nextCooldownRestockMs = 0L; // Cooldown for restocking while waiting on villager cooldowns
+    private boolean shownCooldownHint = false; // Only show "all on cooldown" hint once per session
+    private long allOnCooldownStartMs = 0L; // When we first detected all villagers on cooldown
+    private static final long COOLDOWN_WAIT_TIMEOUT_MS = 10 * 60 * 1000L; // 10 minutes
     
     // Waiting mode - check storage periodically for up to 10 minutes
     private static final long WAIT_TIMEOUT_MS = 10 * 60 * 1000L; // 10 minutes
@@ -1150,7 +1373,8 @@ public class TradeRunStateMachine {
             return;
         }
         
-        if (client.currentScreen != null && containerSession == null) return;
+        // Skip if a non-ESC screen is open and we don't have a container session
+        if (hasContainerScreen(client) && containerSession == null) return;
 
         int floorY = currentFloorKeyY(client);
 
@@ -1197,7 +1421,7 @@ public class TradeRunStateMachine {
             statusThrottled(client, "→ Walking to output");
         }
 
-        if (canInteractWithContainer(client, currentChestPos) || client.currentScreen != null) {
+        if (canInteractWithContainer(client, currentChestPos) || hasContainerScreen(client)) {
             navigator.stop();
             
             // Face the target chest before interacting
@@ -1278,7 +1502,35 @@ public class TradeRunStateMachine {
 
         double dGoal = distSqToGoal(client, currentApproachGoal);
         if (dGoal > APPROACH_GOAL_RANGE_SQ) {
-            if (System.currentTimeMillis() - approachStartMs > STORAGE_NAV_TIMEOUT_MS) {
+            long elapsed = System.currentTimeMillis() - approachStartMs;
+            
+            // After 4s, try going to nearest villager first then retry
+            if (!storageRetryViaVillager && elapsed > STORAGE_RETRY_VIA_VILLAGER_MS) {
+                Optional<VillagerEntity> nearestVillager = villagerFinder.findAnyNearestVillager(client);
+                if (nearestVillager.isPresent()) {
+                    dbg("dump: stuck for 8s, going to villager first then retry");
+                    storageRetryViaVillager = true;
+                    storageRetryTarget = currentChestPos;
+                    BlockPos villagerGoal = navigator.gotoVillagerApproachPoint(client, nearestVillager.get());
+                    if (villagerGoal != null) {
+                        currentApproachGoal = villagerGoal;
+                        approachStartMs = System.currentTimeMillis();
+                        return;
+                    }
+                }
+            }
+            
+            // If we were retrying via villager and reached it, go back to storage
+            if (storageRetryViaVillager && dGoal < 4.0) {
+                dbg("dump: reached villager area, retrying storage navigation");
+                storageRetryViaVillager = false;
+                currentApproachGoal = navigator.gotoStoragePosition(client, storageRetryTarget);
+                storageRetryTarget = null;
+                approachStartMs = System.currentTimeMillis();
+                return;
+            }
+            
+            if (elapsed > STORAGE_NAV_TIMEOUT_MS) {
                 navigator.stop();
                 String dist = String.format("%.1f", Math.sqrt(dGoal));
                 dbg("dump nav timeout: couldn't reach output chest in 12s, dist=" + dist);
@@ -1286,6 +1538,8 @@ public class TradeRunStateMachine {
                 currentChestPos = null;
                 currentChestOpenSpot = null;
                 currentApproachGoal = null;
+                storageRetryViaVillager = false;
+                storageRetryTarget = null;
                 state = State.SEEK;
                 dbg("DETOUR_DUMP -> SEEK (nav timeout)");
             }
@@ -1361,7 +1615,7 @@ public class TradeRunStateMachine {
         }
         
         // If we can interact with the chest, do so
-        if (canInteractWithContainer(client, currentChestPos) || client.currentScreen != null) {
+        if (canInteractWithContainer(client, currentChestPos) || hasContainerScreen(client)) {
             navigator.stop();
             
             // Face the target chest before interacting
@@ -1497,6 +1751,7 @@ public class TradeRunStateMachine {
             containerOpenFirstAttemptMs = now;
         }
 
+        
         if (client.currentScreen == null) {
             if (now - containerOpenFirstAttemptMs > 3000L) {
                 session.error = "Failed to open container";
@@ -1540,8 +1795,16 @@ public class TradeRunStateMachine {
                 session.error = "Container session timeout";
                 session.done = true;
                 dbg("container session timeout forced");
-                say(client, "Container session timeout - closing");
+                say(client, "Container timeout - force closing");
+                // Force close the screen immediately
+                closeAnyScreenProperly(client);
             }
+        }
+        
+        // Extra safety: if session is done, ensure screen is closed
+        if (session.done && client.currentScreen != null && !(client.currentScreen instanceof GameMenuScreen)) {
+            dbg("force closing lingering screen after session done");
+            closeAnyScreenProperly(client);
         }
     }
 
@@ -1553,17 +1816,20 @@ public class TradeRunStateMachine {
     private int floorTransitionPhase = 0; // 0=approach transition, 1=traverse stairs, 2=done
     private long floorTransitionStartMs = 0L;
     private int floorTransitionStartY = 0;
+    private int floorReturnAttempts = 0; // Track repeated fall/return cycles
+    private static final int MAX_FLOOR_RETURN_ATTEMPTS = 3; // Stop after this many failed returns
     
     private void tickSeek(MinecraftClient client) {
         if (client.world == null || client.player == null) return;
         
         // If in wait mode, let the player interact freely (don't close their screens)
-        if (waitReason != null && client.currentScreen != null) {
+        // Also allow ESC menu for AFK
+        if (waitReason != null && hasContainerScreen(client)) {
             return;  // Player is doing something, don't interfere
         }
         
-        // If a screen is open (leftover from dump/restock), close it - but only if not in wait mode
-        if (client.currentScreen != null && waitReason == null) {
+        // If a container screen is open (leftover from dump/restock), close it - but not ESC menu
+        if (hasContainerScreen(client) && waitReason == null) {
             closeAnyScreenProperly(client);
             return;
         }
@@ -1620,11 +1886,12 @@ public class TradeRunStateMachine {
             " have=" + haveInput + "/" + effectiveMin + " needsRestock=" + needsRestock + " floorY=" + floorY);
         
         if (needsRestock) {
-            // If input chest was empty, try other floors first (in multi-floor mode)
-            if (inputChestEmpty) {
-                // In multi-floor mode, try switching to another floor instead of waiting
+            // ALWAYS go to input chest first to check - don't assume it's empty
+            // Only skip to other floors if we JUST checked and it was empty (within last 20s)
+            if (inputChestEmpty && now < nextRestockCheckMs) {
+                // Recently confirmed empty - try other floors in multi-floor mode
                 if (!activeFloorNames.isEmpty() && activeFloorNames.size() > 1) {
-                    dbg("input empty on this floor, trying other floors");
+                    dbg("input confirmed empty recently, trying other floors");
                     if (tryNextFloor(client)) {
                         if (handleInputEmptyFloorSwitch(client)) {
                             return;
@@ -1637,41 +1904,35 @@ public class TradeRunStateMachine {
                     // All floors checked, fall through to wait mode
                 }
                 
-                // Check if cooldown has passed
-                if (now < nextRestockCheckMs) {
-                    // Show wait status in hotbar
-                    long secsLeft = (nextRestockCheckMs - now) / 1000;
-                    statusThrottled(client, "⏳ Waiting for input (" + secsLeft + "s)");
-                    
-                    // Still in cooldown - show countdown message every 5 seconds
-                    if (now - lastWaitMessageMs >= WAIT_MESSAGE_INTERVAL_MS) {
-                        lastWaitMessageMs = now;
-                        long elapsed = now - waitStartMs;
-                        long remaining = WAIT_TIMEOUT_MS - elapsed;
-                        
-                        if (remaining <= 0) {
-                            say(client, "Auto-stopping after 10 minutes of waiting for input");
-                            stop();
-                            return;
-                        }
-                        
-                        int mins = (int) (remaining / 60000);
-                        int secs = (int) ((remaining % 60000) / 1000);
-                        say(client, "no input detected, auto stop in " + mins + ":" + String.format("%02d", secs));
-                    }
-                    return;
-                }
+                // Show wait status in hotbar
+                long secsLeft = (nextRestockCheckMs - now) / 1000;
+                statusThrottled(client, "⏳ Waiting for input (" + secsLeft + "s)");
                 
-                // Cooldown passed - go check the chest
-                dbg("wait check: navigating to input chest");
-                currentChestPos = savedChestPos;
-                currentApproachGoal = null;
-                containerSession = null;
-                state = State.DETOUR_RESTOCK;
+                // Still in cooldown - show countdown message every 5 seconds
+                if (now - lastWaitMessageMs >= WAIT_MESSAGE_INTERVAL_MS) {
+                    lastWaitMessageMs = now;
+                    long elapsed = now - waitStartMs;
+                    long remaining = WAIT_TIMEOUT_MS - elapsed;
+                    
+                    if (remaining <= 0) {
+                        say(client, "Auto-stopping after 10 minutes of waiting for input");
+                        stop();
+                        return;
+                    }
+                    
+                    int mins = (int) (remaining / 60000);
+                    int secs = (int) ((remaining % 60000) / 1000);
+                    say(client, "no input detected, auto stop in " + mins + ":" + String.format("%02d", secs));
+                }
                 return;
             }
             
-            // Not in wait mode yet - go check the chest
+            // Go check the input chest (either first time or cooldown passed)
+            if (inputChestEmpty) {
+                dbg("input empty cooldown passed, rechecking chest");
+                inputChestEmpty = false; // Reset flag before checking again
+            }
+            
             currentApproachGoal = null;
             currentChestPos = null;
             currentChestOpenSpot = null;
@@ -1766,6 +2027,7 @@ public class TradeRunStateMachine {
         // Normal dump check - when outputMin threshold is reached OR inventory is completely full
         boolean invCompletelyFull = (empty == 0);
         boolean shouldDump = thresholdHit || (invCompletelyFull && haveOut > 0);
+        boolean holdingForNextFloor = shouldDump && shouldHoldOutputForNextFloor(client, outId);
         
         // If inventory is full but we don't know output item, warn user
         if (invCompletelyFull && outId == null) {
@@ -1774,7 +2036,7 @@ public class TradeRunStateMachine {
             return;
         }
         
-        if (!outputChestFull && shouldDump) {
+        if (!outputChestFull && shouldDump && !holdingForNextFloor) {
             currentApproachGoal = null;
             currentChestPos = null;
             currentChestOpenSpot = null;
@@ -1782,6 +2044,9 @@ public class TradeRunStateMachine {
             state = State.DETOUR_DUMP;
             dbg("SEEK -> DETOUR_DUMP (threshold=" + thresholdHit + " invFull=" + invCompletelyFull + ")");
             return;
+        } else if (holdingForNextFloor) {
+            dbg("Skipping dump - holding " + outId.getPath() + " for next floor input");
+            statusThrottled(client, "Holding " + outId.getPath() + " for next floor");
         }
 
         Optional<VillagerEntity> best = villagerFinder.findBestTarget(client);
@@ -1820,21 +2085,24 @@ public class TradeRunStateMachine {
                     }
                 }
                 
-                // All villagers on cooldown - use this time to restock if needed
-                // Reuse existing inputId and haveInput from above
-                int inputMax = 64 * 27; // Roughly a full inventory
-                
-                // If we have room for more input items, go restock
-                if (haveInput < inputMax && InventoryOps.emptyMainSlots(client.player) > 3) {
-                    Optional<StorageRegistry.StoredLocation> inputLoc = StorageRegistry.getForY(Role.INPUT, floorY);
-                    if (inputLoc.isPresent()) {
-                        dbg("all villagers on cooldown, restocking while waiting");
-                        currentApproachGoal = null;
-                        currentChestPos = null;
-        currentChestOpenSpot = null;
-                        containerSession = null;
-                        state = State.DETOUR_RESTOCK;
-                        return;
+                // All villagers on cooldown - use this time to restock if needed (but don't loop)
+                long currentMs = System.currentTimeMillis();
+                if (currentMs >= nextCooldownRestockMs) {
+                    int inputMax = 64 * 27; // Roughly a full inventory
+                    
+                    // If we have room for more input items, go restock once
+                    if (haveInput < inputMax && InventoryOps.emptyMainSlots(client.player) > 3) {
+                        Optional<StorageRegistry.StoredLocation> inputLoc = StorageRegistry.getForY(Role.INPUT, floorY);
+                        if (inputLoc.isPresent()) {
+                            dbg("all villagers on cooldown, restocking while waiting");
+                            nextCooldownRestockMs = currentMs + 30000L; // Don't restock again for 30 seconds
+                            currentApproachGoal = null;
+                            currentChestPos = null;
+                            currentChestOpenSpot = null;
+                            containerSession = null;
+                            state = State.DETOUR_RESTOCK;
+                            return;
+                        }
                     }
                 }
             }
@@ -1877,6 +2145,45 @@ public class TradeRunStateMachine {
                         say(client, "Set storage: /traderun storage set input (look at chest)");
                     }
                 }
+            }
+            
+            // Show waiting status when all villagers are on cooldown
+            if (allOnCooldown && totalVillagers > 0) {
+                long currentTimeMs = System.currentTimeMillis();
+                boolean isNight = CooldownRegistry.isNightTime(client);
+                
+                // Start tracking when we first see all on cooldown
+                if (allOnCooldownStartMs == 0L) {
+                    allOnCooldownStartMs = currentTimeMs;
+                    if (isNight && TradeRunSettings.get().nightCooldownEnabled) {
+                        say(client, "All villagers on cooldown - waiting for night to pass");
+                    } else {
+                        say(client, "All villagers on cooldown - waiting for restock (up to 10 min)");
+                    }
+                }
+                
+                long elapsed = currentTimeMs - allOnCooldownStartMs;
+                long remaining = COOLDOWN_WAIT_TIMEOUT_MS - elapsed;
+                
+                if (remaining <= 0) {
+                    // 10 minutes passed, no cooldowns cleared - stop
+                    say(client, "§cFAIL: No villagers restocked after 10 minutes - stopping");
+                    DebugLogger.error("FAIL: All villagers on cooldown for 10 minutes");
+                    stop();
+                    return;
+                }
+                
+                // Show remaining time in hotbar - different message for night
+                int minsLeft = (int) (remaining / 60000);
+                int secsLeft = (int) ((remaining % 60000) / 1000);
+                if (isNight && TradeRunSettings.get().nightCooldownEnabled) {
+                    statusThrottled(client, "🌙 Waiting for night to pass (" + minsLeft + ":" + String.format("%02d", secsLeft) + ")");
+                } else {
+                    statusThrottled(client, "⏳ Waiting for cooldown (" + minsLeft + ":" + String.format("%02d", secsLeft) + ")");
+                }
+            } else {
+                // Some villagers available - reset the cooldown wait timer
+                allOnCooldownStartMs = 0L;
             }
             return;
         }
@@ -1980,7 +2287,19 @@ public class TradeRunStateMachine {
 
         // Allow small tolerance (1 block drop) before forcing a return
         if (playerY >= floorY - 1) {
+            // We're on the floor - reset the return attempt counter
+            floorReturnAttempts = 0;
             return false; // Still close enough to floor height
+        }
+
+        // Track repeated fall attempts - prevent infinite loop
+        floorReturnAttempts++;
+        if (floorReturnAttempts > MAX_FLOOR_RETURN_ATTEMPTS) {
+            say(client, "§cFAIL: Fell off floor " + MAX_FLOOR_RETURN_ATTEMPTS + " times - stopping");
+            say(client, "§7Check if there's a safe path to Y=" + floorY);
+            DebugLogger.error("FAIL: Repeated floor falls - playerY=" + playerY + " floorY=" + floorY);
+            stop();
+            return true;
         }
 
         // Navigate back to the floor - use storage location as a known walkable destination
@@ -2011,8 +2330,8 @@ public class TradeRunStateMachine {
         floorTransitionPhase = 0;
         floorTransitionStartMs = System.currentTimeMillis();
         state = State.FLOOR_TRANSITION;
-        say(client, "Dropped off " + currentFloorName + " floor - heading back to Y=" + floorY);
-        dbg("ensureOnActiveFloor: playerY=" + playerY + ", floorY=" + floorY + " -> returning to " + destination.toShortString());
+        say(client, "Dropped off " + currentFloorName + " floor - heading back (attempt " + floorReturnAttempts + "/" + MAX_FLOOR_RETURN_ATTEMPTS + ")");
+        dbg("ensureOnActiveFloor: playerY=" + playerY + ", floorY=" + floorY + " -> returning to " + destination.toShortString() + " attempt=" + floorReturnAttempts);
         return true;
     }
 
@@ -2135,7 +2454,19 @@ public class TradeRunStateMachine {
                     stuckCheckFailCount++;
                     dbg("stuck check failed (" + stuckCheckFailCount + "/" + STUCK_FAIL_THRESHOLD + "), moved only " + String.format("%.3f", Math.sqrt(movedSq)) + " blocks");
                     if (stuckCheckFailCount >= STUCK_FAIL_THRESHOLD) {
-                        // Truly stuck - fail this villager quickly
+                        // Try escape walk first before giving up
+                        if (stuckCheckFailCount == STUCK_FAIL_THRESHOLD) {
+                            dbg("stuck detection: trying escape walk");
+                            say(client, "§eStuck - trying escape walk...");
+                            BlockPos escapeTarget = navigator.escapeToNearby(client);
+                            if (escapeTarget != null) {
+                                dbg("escape walk to " + escapeTarget);
+                                stuckCheckFailCount++; // Increment so we don't retry escape
+                                return; // Let escape proceed
+                            }
+                        }
+                        
+                        // Escape didn't help - fail this villager
                         navigator.stop();
                         if (currentTarget != null) {
                             RecentFailRegistry.markDiagonalFailure(currentTarget);
@@ -2182,6 +2513,12 @@ public class TradeRunStateMachine {
         Identifier safeInputId = StorageRegistry.getRememberedItem(Role.INPUT, floorY).orElse(learnedInputItemId);
         if (!InventoryOps.ensureFreeHand(client.player, safeInputId)) {
             dbg("OPEN_ATTEMPTS: couldn't secure safe hand (floorY=" + floorY + ")");
+            // Check if holding a placeable block - warn user!
+            net.minecraft.item.ItemStack handStack = client.player.getMainHandStack();
+            if (!handStack.isEmpty() && handStack.getItem() instanceof net.minecraft.item.BlockItem) {
+                say(client, "§c⚠ WARNING: Holding block item! May place blocks - dump inventory!");
+                status(client, "§c⚠ HOLDING BLOCK - MAY PLACE!");
+            }
         }
 
         long now = System.currentTimeMillis();
@@ -2326,7 +2663,6 @@ public class TradeRunStateMachine {
         if (currentTarget != null && !cooldownRegistered) {
             CooldownRegistry.onVillagerTraded(currentTarget);
             InteractedVillagerRegistry.markInteracted(currentTarget);
-            RestockWatcher.markJustTraded(currentTarget); // Ignore particles for a few seconds
             cooldownRegistered = true;
             dbg("cooldown registered for villager");
             
@@ -2527,7 +2863,13 @@ public class TradeRunStateMachine {
     
     // ---- Floor Transition ----
     
-    private static final long FLOOR_TRANSITION_TIMEOUT_MS = 30000L; // 30 seconds max
+    private static final long FLOOR_TRANSITION_TIMEOUT_MS = 45000L; // 45 seconds max for vertical navigation
+    private static final long FLOOR_TRANSITION_RETRY_MS = 10000L; // Give Baritone 10s before trying alternate route
+    private static final int FLOOR_TRANSITION_MAX_RETRIES = 5; // Max villager detour retries
+    private boolean floorTransitionRetryViaVillager = false;
+    private long floorTransitionRetryStartMs = 0L;
+    private long floorTransitionOriginalStartMs = 0L; // Never reset - for absolute timeout
+    private int floorTransitionRetryCount = 0;
     
     private void tickFloorTransition(MinecraftClient client) {
         if (client.player == null || client.world == null) return;
@@ -2538,6 +2880,12 @@ public class TradeRunStateMachine {
         if (floorTransitionStartY == 0 && client.player != null) {
             floorTransitionStartY = client.player.getBlockPos().getY();
         }
+        
+        // Track absolute start time (never reset)
+        if (floorTransitionOriginalStartMs == 0L) {
+            floorTransitionOriginalStartMs = now;
+        }
+        
         boolean goingUp = targetFloorY > floorTransitionStartY;
 
         // Check if we've reached the target floor (directional)
@@ -2560,6 +2908,9 @@ public class TradeRunStateMachine {
             transitionPoint = null;
             floorTransitionPhase = 0;
             floorTransitionStartY = 0;
+            floorReturnAttempts = 0; // Successfully reached floor, reset fall counter
+            floorTransitionOriginalStartMs = 0L;
+            floorTransitionRetryCount = 0;
             
             // Check if we need to restock for this floor's input item
             Identifier inputId = StorageRegistry.getRememberedItem(Role.INPUT, arrivedFloorY).orElse(null);
@@ -2579,16 +2930,77 @@ public class TradeRunStateMachine {
             return;
         }
         
-        // Timeout check
-        if (floorTransitionStartMs > 0 && now - floorTransitionStartMs > FLOOR_TRANSITION_TIMEOUT_MS) {
+        // After 4s of no progress, try going to nearest villager first
+        long elapsed = now - floorTransitionStartMs;
+        if (!floorTransitionRetryViaVillager && elapsed > FLOOR_TRANSITION_RETRY_MS) {
+            Optional<VillagerEntity> nearestVillager = villagerFinder.findAnyNearestVillager(client);
+            if (nearestVillager.isPresent()) {
+                dbg("floor transition: no progress for 10s, trying alternate route via villager");
+                floorTransitionRetryViaVillager = true;
+                floorTransitionRetryStartMs = now;
+                BlockPos villagerGoal = navigator.gotoVillagerApproachPoint(client, nearestVillager.get());
+                if (villagerGoal != null) {
+                    return;
+                }
+            }
+        }
+        
+        // If we went to villager, check if we're making progress
+        if (floorTransitionRetryViaVillager && now - floorTransitionRetryStartMs > FLOOR_TRANSITION_RETRY_MS) {
+            // Check if we moved at all - if not, try escape
+            Vec3d currentPos = client.player.getPos();
+            if (lastMovePos != null) {
+                double movedSq = horizDistSq(currentPos, lastMovePos);
+                if (movedSq < 2.0 * 2.0) {
+                    // Stuck going to villager - try escape  
+                    dbg("floor transition: stuck on alternate route, attempting escape");
+                    BlockPos escapeTarget = navigator.escapeToNearby(client);
+                    if (escapeTarget != null) {
+                        dbg("floor transition: escaping to " + escapeTarget);
+                        floorTransitionRetryStartMs = now; // Give escape some time
+                        return;
+                    }
+                }
+            }
+            
+            floorTransitionRetryCount++;
+            dbg("floor transition: retrying after villager detour (attempt " + floorTransitionRetryCount + "/" + FLOOR_TRANSITION_MAX_RETRIES + ")");
+            floorTransitionRetryViaVillager = false;
+            navigator.gotoFloorPosition(client, transitionPoint);
+            floorTransitionStartMs = now; // Reset timer for retry
+            return;
+        }
+        
+        // Check retry limit
+        if (floorTransitionRetryCount >= FLOOR_TRANSITION_MAX_RETRIES) {
             navigator.stop();
             releaseForwardKey(client);
-            say(client, "Floor transition timeout - couldn't reach Y=" + targetFloorY);
-            dbg("FLOOR_TRANSITION timeout");
+            say(client, "§c⚠ Floor transition failed after " + FLOOR_TRANSITION_MAX_RETRIES + " retries - stuck!");
+            dbg("FLOOR_TRANSITION max retries reached");
             
             targetFloorY = 0;
             transitionPoint = null;
             floorTransitionPhase = 0;
+            floorTransitionRetryViaVillager = false;
+            floorTransitionOriginalStartMs = 0L;
+            floorTransitionRetryCount = 0;
+            state = State.SEEK;
+            return;
+        }
+        
+        // Absolute timeout check (uses original start time, not reset time)
+        if (floorTransitionOriginalStartMs > 0 && now - floorTransitionOriginalStartMs > FLOOR_TRANSITION_TIMEOUT_MS) {
+            navigator.stop();
+            releaseForwardKey(client);
+            say(client, "§c⚠ Floor transition timeout - couldn't reach Y=" + targetFloorY);
+            dbg("FLOOR_TRANSITION timeout (absolute)");
+            
+            targetFloorY = 0;
+            transitionPoint = null;
+            floorTransitionPhase = 0;
+            floorTransitionRetryViaVillager = false;
+            floorTransitionOriginalStartMs = 0L;
+            floorTransitionRetryCount = 0;
             state = State.SEEK;
             return;
         }
@@ -2608,8 +3020,27 @@ public class TradeRunStateMachine {
         );
         
         if (distSq < 4.0) {
-            // Close enough horizontally - let Baritone handle the Y movement
-            dbg("FLOOR_TRANSITION: near target, letting Baritone finish");
+            // Close enough horizontally but wrong Y - check if we're stuck
+            int yDiff = Math.abs(currentY - targetFloorY);
+            if (yDiff > 1) {
+                // Still need to change Y level but Baritone might be stuck
+                // Check if we've been here too long (use transition timeout / 2)
+                long stuckTime = now - floorTransitionStartMs;
+                if (stuckTime > FLOOR_TRANSITION_TIMEOUT_MS / 2) {
+                    // Stuck for 15+ seconds near target but wrong Y - give up on this transition
+                    navigator.stop();
+                    releaseForwardKey(client);
+                    say(client, "⚠ Can't reach Y=" + targetFloorY + " from here - continuing on current floor");
+                    dbg("FLOOR_TRANSITION: stuck near target, giving up");
+                    
+                    // Reset and go back to SEEK on current floor
+                    targetFloorY = 0;
+                    transitionPoint = null;
+                    floorTransitionPhase = 0;
+                    state = State.SEEK;
+                    return;
+                }
+            }
         }
         
         // Keep navigating to the transition point

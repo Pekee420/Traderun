@@ -1,1 +1,3 @@
 v1	named	intermediary
+FIELD	com/example/traderun/mixin/GameMenuBypassMixin	Lnet/minecraft/client/gui/screen/Screen;	currentScreen	field_1755
+METHOD	com/example/traderun/mixin/GameMenuBypassMixin	(Lnet/minecraft/client/gui/screen/Screen;)V	setScreen	method_1507

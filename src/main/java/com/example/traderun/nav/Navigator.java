@@ -46,7 +46,7 @@ public final class Navigator {
         BlockPos target = ApproachUtil.findBestStraightApproach(client, villager);
         if (target != null) {
             lastApproachWasDiagonal = false;
-            setGoal(client, target);
+            setGoalVillagerApproach(client, target);
             return target;
         }
         
@@ -58,7 +58,7 @@ public final class Navigator {
         }
         
         lastApproachWasDiagonal = true;
-        setGoal(client, target);
+        setGoalVillagerApproach(client, target);
         return target;
     }
 
@@ -73,7 +73,7 @@ public final class Navigator {
         }
         
         lastApproachWasDiagonal = !isStraightFromVillager(villager, target);
-        setGoal(client, target);
+        setGoalVillagerApproach(client, target);
         return target;
     }
 
@@ -91,7 +91,7 @@ public final class Navigator {
         }
         
         lastApproachWasDiagonal = !isStraightFromVillager(villager, target);
-        setGoal(client, target);
+        setGoalVillagerApproach(client, target);
         return target;
     }
 
@@ -147,6 +147,53 @@ public final class Navigator {
         gotoIssued = false;
         posAtGoalSet = null;
     }
+    
+    /**
+     * Emergency escape - walk to a random nearby position using Baritone without Y limits.
+     * Used when stuck on obstacles like brewing stands.
+     * Returns the target position or null if failed.
+     */
+    public BlockPos escapeToNearby(MinecraftClient client) {
+        if (client == null || client.player == null || client.world == null) return null;
+        
+        stop(); // Clear any current navigation
+        
+        BlockPos playerPos = client.player.getBlockPos();
+        
+        // Try close positions first (1-2 blocks), then farther (3-5 blocks)
+        // This helps in tight 2-block high spaces
+        int[][] distances = {{1, -1, 2, -2}, {3, -3, 4, -4, 5, -5}};
+        java.util.Random rand = new java.util.Random();
+        
+        for (int[] offsets : distances) {
+            for (int attempt = 0; attempt < 12; attempt++) {
+                int dx = offsets[rand.nextInt(offsets.length)];
+                int dz = offsets[rand.nextInt(offsets.length)];
+                
+                // Skip if both dx and dz are the same (diagonal in same direction)
+                if (attempt > 6 && dx == dz) continue;
+                
+                // Look for ground at different Y levels (prioritize same level and down)
+                for (int dy : new int[]{0, -1, 1, -2, 2}) {
+                    BlockPos target = playerPos.add(dx, dy, dz);
+                    
+                    // Check if it's a valid standing position (2 blocks high space)
+                    boolean groundSolid = client.world.getBlockState(target.down()).isSolid();
+                    boolean feetClear = !client.world.getBlockState(target).isSolid();
+                    boolean headClear = !client.world.getBlockState(target.up()).isSolid();
+                    
+                    if (groundSolid && feetClear && headClear) {
+                        // Use Baritone to navigate there with no Y restrictions
+                        setGoalAllowDifferentFloor(client, target);
+                        return target;
+                    }
+                }
+            }
+        }
+        
+        lastError = "no escape position found";
+        return null;
+    }
 
     public boolean isBaritoneAvailable() { return baritoneAvailable; }
     public boolean wasGotoIssued() { return gotoIssued; }
@@ -172,14 +219,19 @@ public final class Navigator {
     // ---- Goal Setting (NO CHAT EVER) ----
 
     private void setGoal(MinecraftClient client, BlockPos goal) {
-        setGoalInternal(client, goal, false);
+        setGoalInternal(client, goal, false, 1);
     }
     
     private void setGoalAllowDifferentFloor(MinecraftClient client, BlockPos goal) {
-        setGoalInternal(client, goal, true);
+        setGoalInternal(client, goal, true, 999);
     }
     
-    private void setGoalInternal(MinecraftClient client, BlockPos goal, boolean allowDifferentFloor) {
+    // For villager approach - allow up to 3 blocks Y difference (villagers may be on platforms)
+    private void setGoalVillagerApproach(MinecraftClient client, BlockPos goal) {
+        setGoalInternal(client, goal, false, 3);
+    }
+    
+    private void setGoalInternal(MinecraftClient client, BlockPos goal, boolean allowDifferentFloor, int yTolerance) {
         if (goal == null || client == null || client.player == null) return;
 
         long now = System.currentTimeMillis();
@@ -195,9 +247,9 @@ public final class Navigator {
 
         int playerY = client.player.getBlockPos().getY();
         
-        // Reject goals on different Y level (unless allowed for chests)
-        if (!allowDifferentFloor && Math.abs(goal.getY() - playerY) > 1) {
-            lastError = "goal on different floor";
+        // Reject goals on different Y level (unless allowed)
+        if (!allowDifferentFloor && Math.abs(goal.getY() - playerY) > yTolerance) {
+            lastError = "goal on different floor (y diff=" + Math.abs(goal.getY() - playerY) + ", tolerance=" + yTolerance + ")";
             activeGoal = null;
             return;
         }
@@ -235,6 +287,16 @@ public final class Navigator {
     public void tickDirectWalk(MinecraftClient client) {
         if (client == null || client.player == null) return;
 
+        // NEVER use direct walk fallback for vertical navigation (floor transitions)
+        // Direct walk can't handle stairs/ladders and will just walk into walls
+        if (allowYLevelChanges && activeGoal != null) {
+            int playerY = client.player.getBlockPos().getY();
+            if (Math.abs(activeGoal.getY() - playerY) > 2) {
+                // Different floor and more than 2 blocks away vertically - don't use direct walk
+                return;
+            }
+        }
+
         // Check if Baritone was issued but player hasn't moved - switch to direct walk
         if (gotoIssued && !directWalkActive && posAtGoalSet != null && activeGoal != null) {
             long elapsed = System.currentTimeMillis() - goalSetTimeMs;
@@ -242,6 +304,10 @@ public final class Navigator {
                 Vec3d currentPos = client.player.getPos();
                 double movedSq = horizDistSq(currentPos, posAtGoalSet);
                 if (movedSq < 0.01) {
+                    // Don't fall back to direct walk for vertical navigation
+                    if (allowYLevelChanges && Math.abs(activeGoal.getY() - client.player.getBlockPos().getY()) > 2) {
+                        return; // Let Baritone keep trying
+                    }
                     cancelBaritone();
                     startDirectWalk(client);
                 }
@@ -255,16 +321,37 @@ public final class Navigator {
 
         // Stop if Y changed significantly - but ONLY for same-floor navigation
         // If allowYLevelChanges is true (floor transitions), skip this check entirely
-        // If goal is on a different Y (chest runs), also allow Y changes
         if (!allowYLevelChanges) {
             boolean sameFloorGoal = Math.abs(activeGoal.getY() - directWalkStartY) < 1.5;
             if (sameFloorGoal) {
                 double yDiff = playerPos.y - directWalkStartY;
-                // - Fell more than 0.5 blocks (avoid accidental drops)
-                // - Climbed more than 0.4 blocks (sliding up onto trading blocks/slabs)
-                if (yDiff < -0.5 || yDiff > 0.4) {
+                // Detect falls early (>0.8 blocks) to stop before going too far
+                // Allow small climbs (0.6) for minor variations but catch stepping on blocks
+                if (yDiff < -0.8 || yDiff > 0.6) {
                     stopDirectWalk();
                     lastError = yDiff > 0 ? "climbed onto block" : "Y level dropped";
+                    return;
+                }
+            }
+        }
+        
+        // EDGE DETECTION: Check if there's a hole in front of us
+        if (!allowYLevelChanges && client.world != null) {
+            double gx = activeGoal.getX() + 0.5;
+            double gz = activeGoal.getZ() + 0.5;
+            double pdx = gx - playerPos.x;
+            double pdz = gz - playerPos.z;
+            double len = Math.sqrt(pdx * pdx + pdz * pdz);
+            if (len > 0.1) {
+                // Normalize and look 1.5 blocks ahead
+                pdx = pdx / len * 1.5;
+                pdz = pdz / len * 1.5;
+                BlockPos ahead = BlockPos.ofFloored(playerPos.x + pdx, playerPos.y - 0.5, playerPos.z + pdz);
+                BlockPos aheadDown = ahead.down();
+                // If there's no ground ahead, stop walking
+                if (!client.world.getBlockState(aheadDown).isSolid() && !client.world.getBlockState(ahead).isSolid()) {
+                    stopDirectWalk();
+                    lastError = "hole detected ahead";
                     return;
                 }
             }
@@ -276,12 +363,20 @@ public final class Navigator {
         double dz = gz - playerPos.z;
         double distSq = dx * dx + dz * dz;
 
-        // Close enough
+        // Close enough - but check Y level too if we're supposed to be at different floor
         if (distSq < 0.5 * 0.5) {
+            // If goal is on different Y, make sure we're at the right Y level
+            if (allowYLevelChanges) {
+                int playerY = client.player.getBlockPos().getY();
+                if (Math.abs(activeGoal.getY() - playerY) > 1) {
+                    // Horizontally close but wrong Y - don't stop yet
+                    return;
+                }
+            }
             stopDirectWalk();
             return;
         }
-
+        
         // Timeout after 8s
         if (now - directWalkStartMs > 8000L) {
             stopDirectWalk();
@@ -347,33 +442,97 @@ public final class Navigator {
 
     // ---- Baritone Reflection (NO CHAT COMMANDS) ----
 
-    private void configureBaritone() {
-        if (baritoneConfigured) return;
+    // Static flag - only configure Baritone ONCE per Minecraft session
+    private static boolean baritoneConfiguredThisSession = false;
+    
+    /**
+     * Force configure Baritone safety settings. Only runs ONCE per session.
+     */
+    public void forceConfigureBaritone() {
+        if (baritoneConfiguredThisSession) {
+            return;  // Already configured this session, don't spam
+        }
+        baritoneConfigured = false;
+        configureBaritone();
+    }
 
+    private void configureBaritone() {
+        // Try reflection first (silent)
+        boolean reflectionWorked = tryConfigureViaReflection();
+        
+        if (!reflectionWorked) {
+            // Only use command manager fallback if reflection failed
+            MinecraftClient client = MinecraftClient.getInstance();
+            if (client != null && client.player != null) {
+                pendingBaritoneCommands.clear();
+                pendingBaritoneCommands.add("set allowBreak false");
+                pendingBaritoneCommands.add("set allowBreakAnyway false");
+                pendingBaritoneCommands.add("set allowPlace false");
+            }
+        }
+        
+        baritoneConfigured = true;
+        baritoneConfiguredThisSession = true;  // Mark as done for this session
+    }
+    
+    // Queue of Baritone commands to send via command manager
+    private final java.util.Deque<String> pendingBaritoneCommands = new java.util.ArrayDeque<>();
+    private long lastBaritoneCommandMs = 0L;
+    
+    /**
+     * Call this from tick to send pending Baritone commands (one per 200ms)
+     */
+    public void tickBaritoneCommands() {
+        if (pendingBaritoneCommands.isEmpty()) return;
+        
+        long now = System.currentTimeMillis();
+        if (now - lastBaritoneCommandMs < 200L) return;
+        
+        String cmd = pendingBaritoneCommands.pollFirst();
+        if (cmd != null) {
+            try {
+                Class<?> baritoneAPI = Class.forName("baritone.api.BaritoneAPI");
+                Method getProvider = baritoneAPI.getMethod("getProvider");
+                Object provider = getProvider.invoke(null);
+                Method getPrimary = provider.getClass().getMethod("getPrimaryBaritone");
+                Object baritone = getPrimary.invoke(provider);
+                Method getCommandManager = baritone.getClass().getMethod("getCommandManager");
+                Object cmdMgr = getCommandManager.invoke(baritone);
+                Method execute = cmdMgr.getClass().getMethod("execute", String.class);
+                execute.invoke(cmdMgr, cmd);
+            } catch (Throwable ignored) {}
+            lastBaritoneCommandMs = now;
+        }
+    }
+    
+    private boolean tryConfigureViaReflection() {
         try {
             Class<?> baritoneAPI = Class.forName("baritone.api.BaritoneAPI");
             Method getSettings = baritoneAPI.getMethod("getSettings");
             Object settings = getSettings.invoke(null);
+            if (settings == null) return false;
 
-            setBool(settings, "allowBreak", false);
-            setBool(settings, "allowPlace", false);
-            setBool(settings, "allowParkour", false);
-            setBool(settings, "allowParkourPlace", false);
-            setBool(settings, "allowDiagonalAscend", false);
-            setBool(settings, "allowDiagonalDescend", false);
-            setBool(settings, "chatControl", false);
-            setBool(settings, "chatDebug", false);
+            setBoolSafe(settings, "allowBreak", false);
+            setBoolSafe(settings, "allowBreakAnyway", false);
+            setBoolSafe(settings, "allowPlace", false);
+            setBoolSafe(settings, "allowInventory", false);
+            setBoolSafe(settings, "allowParkour", false);
+            setBoolSafe(settings, "allowParkourPlace", false);
 
-            baritoneConfigured = true;
-        } catch (Throwable ignored) {}
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
-    private void setBool(Object settings, String name, boolean value) {
+    private void setBoolSafe(Object settings, String name, boolean value) {
         try {
             java.lang.reflect.Field field = settings.getClass().getField(name);
             Object setting = field.get(settings);
-            Method setValue = setting.getClass().getMethod("set", Object.class);
-            setValue.invoke(setting, value);
+            if (setting != null) {
+                Method m = setting.getClass().getMethod("set", Object.class);
+                m.invoke(setting, value);
+            }
         } catch (Throwable ignored) {}
     }
 

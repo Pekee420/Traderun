@@ -19,7 +19,7 @@ public final class TradeRunSettings {
     public int inputMin = 32;    // half stack
     public int outputMin = 672;  // 10.5 stacks
     public int clickRateMs = 170;
-    public int cooldownSec = 840; // 14 minutes - safety fallback if particle detection fails
+    public int cooldownSec = 600; // 10 minutes default cooldown
     public boolean nightCooldownEnabled = true; // Extend cooldown through night
 
     // Optional tunables (safe defaults)

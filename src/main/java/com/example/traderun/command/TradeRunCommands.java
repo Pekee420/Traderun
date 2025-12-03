@@ -9,6 +9,7 @@ import com.example.traderun.villager.VillagerFinder;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.suggestion.SuggestionProvider;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
@@ -30,6 +31,54 @@ import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.lit
 
 public final class TradeRunCommands {
     private TradeRunCommands() {}
+    
+    // All Minecraft villager professions for tab completion
+    private static final String[] PROFESSIONS = {
+        "armorer", "butcher", "cartographer", "cleric", "farmer",
+        "fisherman", "fletcher", "leatherworker", "librarian", "mason",
+        "nitwit", "none", "shepherd", "toolsmith", "weaponsmith"
+    };
+    
+    private static final SuggestionProvider<FabricClientCommandSource> PROFESSION_SUGGESTIONS = (context, builder) -> {
+        String remaining = builder.getRemaining().toLowerCase();
+        // Get what's already typed (to support multiple professions)
+        String[] parts = remaining.split("\\s+");
+        String currentWord = parts.length > 0 ? parts[parts.length - 1] : "";
+        
+        for (String prof : PROFESSIONS) {
+            if (prof.startsWith(currentWord)) {
+                builder.suggest(remaining.isEmpty() ? prof : 
+                    remaining.substring(0, remaining.length() - currentWord.length()) + prof);
+            }
+        }
+        return builder.buildFuture();
+    };
+    
+    // Suggestions for both professions AND registered floor names
+    private static final SuggestionProvider<FabricClientCommandSource> PROFESSION_AND_FLOOR_SUGGESTIONS = (context, builder) -> {
+        String remaining = builder.getRemaining().toLowerCase();
+        String[] parts = remaining.split("\\s+");
+        String currentWord = parts.length > 0 ? parts[parts.length - 1] : "";
+        
+        // Suggest professions
+        for (String prof : PROFESSIONS) {
+            if (prof.startsWith(currentWord)) {
+                builder.suggest(remaining.isEmpty() ? prof : 
+                    remaining.substring(0, remaining.length() - currentWord.length()) + prof);
+            }
+        }
+        
+        // Also suggest registered floor names
+        for (String floorName : FloorRegistry.getAllFloorNames()) {
+            String lower = floorName.toLowerCase();
+            if (lower.startsWith(currentWord)) {
+                builder.suggest(remaining.isEmpty() ? floorName : 
+                    remaining.substring(0, remaining.length() - currentWord.length()) + floorName);
+            }
+        }
+        
+        return builder.buildFuture();
+    };
 
     public static void register(CommandDispatcher<FabricClientCommandSource> dispatcher) {
         register(dispatcher, null);
@@ -38,24 +87,17 @@ public final class TradeRunCommands {
     public static void register(CommandDispatcher<FabricClientCommandSource> dispatcher, CommandRegistryAccess registryAccess) {
         dispatcher.register(
                 literal("traderun")
-                        // /traderun start <profession> [profession2] ...
+                        // /traderun start <profession|floorname> [profession2|floorname2] ...
+                        // Auto-detects if arguments are floor names or professions
                         .then(literal("start")
-                                .then(argument("professions", StringArgumentType.greedyString())
+                                .then(argument("targets", StringArgumentType.greedyString())
+                                        .suggests(PROFESSION_AND_FLOOR_SUGGESTIONS)
                                         .executes(ctx -> {
-                                            String profs = StringArgumentType.getString(ctx, "professions");
-                                            TradeRunRuntime.get().startMultiple(profs);
-                                            msg("started (" + profs + ")");
+                                            String input = StringArgumentType.getString(ctx, "targets");
+                                            String result = TradeRunRuntime.get().startSmartDetect(input);
+                                            msg(result);
                                             return 1;
-                                        }))
-                                // /traderun start floors <floorname1,floorname2,...>
-                                .then(literal("floors")
-                                        .then(argument("floorNames", StringArgumentType.greedyString())
-                                                .executes(ctx -> {
-                                                    String names = StringArgumentType.getString(ctx, "floorNames");
-                                                    String result = TradeRunRuntime.get().startByFloorNames(names);
-                                                    msg(result);
-                                                    return 1;
-                                                }))))
+                                        })))
 
                         // /traderun stop
                         .then(literal("stop").executes(ctx -> {
@@ -89,12 +131,17 @@ public final class TradeRunCommands {
                                     int count = CooldownRegistry.count();
                                     int sec = TradeRunSettings.get().cooldownSec;
                                     msg("Cooldown: " + sec + "s (" + (sec/60) + "m" + (sec%60) + "s), " + count + " villagers on cooldown");
-                                    msg("Use: /traderun cooldown reset | /traderun set cooldownSec <seconds>");
+                                    msg("Use: /traderun cooldown clearall | /traderun set cooldownSec <seconds>");
                                     return 1;
                                 })
                                 .then(literal("reset").executes(ctx -> {
                                     CooldownRegistry.resetAll();
                                     msg("All cooldowns cleared");
+                                    return 1;
+                                }))
+                                .then(literal("clearall").executes(ctx -> {
+                                    CooldownRegistry.resetAll();
+                                    msg("All villager cooldowns cleared - villagers ready to trade");
                                     return 1;
                                 })))
 
@@ -163,6 +210,7 @@ public final class TradeRunCommands {
                                         // /traderun floor add <name> <profession>
                                         .then(argument("floorName", StringArgumentType.word())
                                                 .then(argument("profession", StringArgumentType.word())
+                                                        .suggests(PROFESSION_SUGGESTIONS)
                                                         .executes(ctx -> {
                                                             String floorName = StringArgumentType.getString(ctx, "floorName");
                                                             String prof = StringArgumentType.getString(ctx, "profession");
@@ -210,6 +258,60 @@ public final class TradeRunCommands {
                                 .then(literal("clear").executes(ctx -> {
                                     FloorRegistry.clear();
                                     msg("All floors cleared");
+                                    return 1;
+                                }))
+                                .then(literal("del")
+                                        .then(argument("floorName", StringArgumentType.word())
+                                                .executes(ctx -> {
+                                                    String floorName = StringArgumentType.getString(ctx, "floorName");
+                                                    // Try to find floor by name
+                                                    var floors = FloorRegistry.getAllFloors();
+                                                    boolean found = false;
+                                                    for (var f : floors) {
+                                                        if (floorName.equalsIgnoreCase(f.name)) {
+                                                            FloorRegistry.removeFloor(f.y);
+                                                            msg("Deleted floor: " + floorName + " (Y=" + f.y + ")");
+                                                            found = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                    // Try by Y level
+                                                    if (!found) {
+                                                        try {
+                                                            int y = Integer.parseInt(floorName);
+                                                            FloorRegistry.removeFloor(y);
+                                                            msg("Deleted floor at Y=" + y);
+                                                            found = true;
+                                                        } catch (NumberFormatException ignored) {}
+                                                    }
+                                                    if (!found) {
+                                                        msg("Floor not found: " + floorName);
+                                                        msg("Use floor name or Y level (e.g., /traderun floor del clerics OR /traderun floor del 30)");
+                                                    }
+                                                    return 1;
+                                                })))
+                                .then(literal("rescan").executes(ctx -> {
+                                    MinecraftClient c = MinecraftClient.getInstance();
+                                    if (c == null || c.player == null) return 0;
+                                    int y = c.player.getBlockPos().getY();
+                                    var floors = FloorRegistry.getAllFloors();
+                                    FloorRegistry.FloorInfo currentFloor = null;
+                                    for (var f : floors) {
+                                        if (f.y == y) {
+                                            currentFloor = f;
+                                            break;
+                                        }
+                                    }
+                                    if (currentFloor == null) {
+                                        msg("No floor registered at Y=" + y);
+                                        msg("Use /traderun floor add <name> <profession> first");
+                                        return 0;
+                                    }
+                                    // Rescan with the first profession
+                                    String prof = currentFloor.professions.isEmpty() ? "" : 
+                                        currentFloor.professions.iterator().next();
+                                    FloorRegistry.ScanResult result = FloorRegistry.scanFloor(c, prof);
+                                    msg("Rescanned floor " + currentFloor.getDisplayName() + ": " + result.message);
                                     return 1;
                                 }))
                                 .then(literal("transition")
@@ -464,7 +566,15 @@ public final class TradeRunCommands {
         helpMsg("§f/traderun floor list");
         helpMsg("§7Shows all registered floors");
         helpMsg("");
-        helpMsg("§e§lClear floors:§r");
+        helpMsg("§e§lDelete floor:§r");
+        helpMsg("§f/traderun floor del <name|Y>");
+        helpMsg("§7Delete by name or Y level");
+        helpMsg("");
+        helpMsg("§e§lRescan floor:§r");
+        helpMsg("§f/traderun floor rescan");
+        helpMsg("§7Re-counts villagers on current floor");
+        helpMsg("");
+        helpMsg("§e§lClear all floors:§r");
         helpMsg("§f/traderun floor clear");
         helpMsg("§7Removes all floor data");
         helpMsg("");
@@ -489,13 +599,16 @@ public final class TradeRunCommands {
         helpMsg("§7Look at chest, run command. Items you GET from villagers.");
         helpMsg("");
         helpMsg("§e§lDelete storage:§r");
-        helpMsg("§f/traderun storage del input");
-        helpMsg("§f/traderun storage del output");
+        helpMsg("§f/traderun storage del input|output");
+        helpMsg("");
+        helpMsg("§e§lClear learned items:§r");
+        helpMsg("§f/traderun storage clear input|output|all");
+        helpMsg("§7Clears remembered items (re-learn from chest)");
         helpMsg("");
         helpMsg("§e§lList storage:§r");
         helpMsg("§f/traderun storage list");
         helpMsg("");
-        helpMsg("§c§lNote:§r Input item is auto-learned from first slot of chest!");
+        helpMsg("§c§lNote:§r Items auto-learned from first slot when you open chest!");
     }
     
     private static void showHelpTrading() {
@@ -550,24 +663,27 @@ public final class TradeRunCommands {
     private static void showHelpCooldown() {
         helpMsg("§6§l=== COOLDOWN SETTINGS ===");
         helpMsg("");
-        helpMsg("§7Villagers need time to restock their trades.");
+        helpMsg("§7Villagers need time to restock at their workstation.");
+        helpMsg("§7Timer-based cooldown (default 14 min) tracks this.");
         helpMsg("");
         helpMsg("§e§lView cooldown:§r");
         helpMsg("§f/traderun cooldown current");
         helpMsg("");
-        helpMsg("§e§lSet cooldown:§r");
+        helpMsg("§e§lSet cooldown time:§r");
         helpMsg("§f/traderun cooldown set <seconds>");
-        helpMsg("§7Default: 130s (2m10s). Villagers restock 2x/day.");
+        helpMsg("§7Default: 840s (14min). Villagers restock 2x per day.");
         helpMsg("");
         helpMsg("§e§lNight extension:§r");
         helpMsg("§f/traderun cooldown night true|false");
-        helpMsg("§7If ON, cooldown extends through night (villagers sleep)");
+        helpMsg("§7If ON, cooldowns extend through night (villagers sleep)");
+        helpMsg("§7Villagers only restock during day in Minecraft.");
         helpMsg("");
-        helpMsg("§e§lReset all cooldowns:§r");
-        helpMsg("§f/traderun cooldown reset");
-        helpMsg("§7Clears all villager cooldowns (for testing)");
+        helpMsg("§e§lClear all cooldowns:§r");
+        helpMsg("§f/traderun cooldown clearall");
+        helpMsg("§7Clears all villager cooldowns immediately");
         helpMsg("");
-        helpMsg("§7Cooldowns persist across sessions (saved to file)");
+        helpMsg("§e§lVisual indicators:§r");
+        helpMsg("§7Orange particles = on cooldown, §agreen§7 = INPUT, §cred§7 = OUTPUT");
     }
 
     private static BlockPos lookedAtBlockPos() {

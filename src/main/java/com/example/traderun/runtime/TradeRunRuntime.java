@@ -41,6 +41,50 @@ public final class TradeRunRuntime {
         String[] names = floorNamesString.trim().split("[,\\s]+");
         return fsm.startForFloorNames(java.util.Arrays.asList(names));
     }
+    
+    /**
+     * Smart start - auto-detect if input is floor names or professions.
+     * Floor names take priority if they exist in the registry.
+     */
+    public String startSmartDetect(String input) {
+        String[] parts = input.trim().split("[,\\s]+");
+        java.util.List<String> tokens = new java.util.ArrayList<>();
+        for (String p : parts) {
+            if (p != null && !p.trim().isEmpty()) {
+                tokens.add(p.trim());
+            }
+        }
+        
+        if (tokens.isEmpty()) {
+            return "Usage: /traderun start <profession|floorname> [more...]";
+        }
+        
+        // Check if ALL tokens are registered floor names
+        java.util.List<String> floorNames = com.example.traderun.floor.FloorRegistry.getAllFloorNames();
+        boolean allAreFloors = true;
+        for (String token : tokens) {
+            boolean found = false;
+            for (String fn : floorNames) {
+                if (fn.equalsIgnoreCase(token)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                allAreFloors = false;
+                break;
+            }
+        }
+        
+        if (allAreFloors && !tokens.isEmpty()) {
+            // Start by floor names
+            return fsm.startForFloorNames(tokens);
+        } else {
+            // Treat as professions
+            fsm.startForProfessions(tokens);
+            return "Started (" + String.join(", ", tokens) + ")";
+        }
+    }
 
     public void stop() {
         fsm.stop();

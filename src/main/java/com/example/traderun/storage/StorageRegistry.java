@@ -239,11 +239,36 @@ public final class StorageRegistry {
     }
 
     public static synchronized Optional<Vec3d> getOpenSpot(Role role, int floorY) {
-        FloorData f = FLOORS.get(floorY);
-        if (f == null) return Optional.empty();
-        RoleData rd = (role == Role.INPUT) ? f.input : f.output;
-        if (rd == null || rd.openSpot == null || rd.openSpot.length < 3) return Optional.empty();
-        return Optional.of(new Vec3d(rd.openSpot[0], rd.openSpot[1], rd.openSpot[2]));
+        // First try exact match
+        FloorData exact = FLOORS.get(floorY);
+        if (exact != null) {
+            RoleData rd = (role == Role.INPUT) ? exact.input : exact.output;
+            if (rd != null && rd.openSpot != null && rd.openSpot.length >= 3) {
+                return Optional.of(new Vec3d(rd.openSpot[0], rd.openSpot[1], rd.openSpot[2]));
+            }
+        }
+
+        // Fallback: search nearby floors (±3 Y levels) - same as getForY
+        FloorData best = null;
+        int bestDy = Integer.MAX_VALUE;
+
+        for (FloorData f : FLOORS.values()) {
+            int dy = Math.abs(f.y - floorY);
+            if (dy > 3) continue;
+            RoleData rd = (role == Role.INPUT) ? f.input : f.output;
+            if (rd == null || rd.openSpot == null || rd.openSpot.length < 3) continue;
+            if (dy < bestDy) {
+                bestDy = dy;
+                best = f;
+            }
+        }
+
+        if (best == null) return Optional.empty();
+        RoleData rd = (role == Role.INPUT) ? best.input : best.output;
+        if (rd != null && rd.openSpot != null && rd.openSpot.length >= 3) {
+            return Optional.of(new Vec3d(rd.openSpot[0], rd.openSpot[1], rd.openSpot[2]));
+        }
+        return Optional.empty();
     }
 
     /**

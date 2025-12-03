@@ -1,17 +1,21 @@
-# Traderun Mod v0.9.5
+# TradeRun Mod v1.0.7
 
-**Pekee's Traderun Mod** — Automatic villager trading hall automation for Minecraft 1.21.4.
+**Pekee's TradeRun Mod** — Professional automated villager trading hall bot for Minecraft 1.21.4.
 
 ## Features
 
-- 🏃 **Auto-navigation** to villagers using Baritone (with fallback direct walk)
-- 🔄 **Multi-floor support** — trade across multiple levels automatically
-- 📦 **Automatic restocking** — fetches input items from storage when low
-- 📤 **Automatic dumping** — deposits output items when inventory is full
-- ⏰ **Smart cooldowns** — day/night aware villager cooldown tracking
-- 🎯 **Profession filtering** — trade only with specific villager types
-- 💾 **Persistent settings** — all configurations saved between sessions
-- 🧠 **Auto item learning** — opens a storage chest and it remembers the trade item!
+- 🏃 **Advanced Navigation** — Baritone-powered pathfinding with intelligent fallback to direct walk
+- 🔄 **Multi-Floor Automation** — Seamless trading across multiple Y-levels with automatic transitions
+- 📦 **Smart Inventory Management** — Automatic restocking/dumping with optimized item handling
+- 📤 **Output Optimization** — Skips unnecessary dumps when output matches next floor's input
+- ⏰ **Intelligent Cooldowns** — Day/night-aware villager tracking with particle detection fallback
+- 🎯 **Profession Targeting** — Trade only with specific villager professions per floor
+- 👁️ **Visual Indicators** — Red pumpkin heads on cooldown villagers, colored storage markers
+- 🕒 **Background Operation** — Continues trading even when Minecraft window is unfocused
+- 🛡️ **Anti-Fall Protection** — Edge detection prevents walking off platforms
+- 📊 **Queue Detection** — Pauses trading during server queues with automatic resume
+- 💾 **Persistent Configuration** — All settings saved between Minecraft sessions
+- 🧠 **Auto Item Learning** — Opens a storage chest once and remembers the trade items forever
 
 ## Requirements
 
@@ -20,6 +24,7 @@
 - **Fabric Loader 0.15.0+**
 - **Fabric API**
 - **Baritone** (for pathfinding) — Must be the Fabric version for 1.21.4
+- **AutoTrade** (for trade whitelist) — Required for the bot to actually trade with villagers
 
 ### Optional (Recommended)
 - **Mod Menu** — for easy access to mod settings
@@ -30,12 +35,18 @@
 1. Install [Fabric Loader](https://fabricmc.net/use/installer/) for Minecraft 1.21.4
 2. Download and install [Fabric API](https://modrinth.com/mod/fabric-api)
 3. Download and install [Baritone](https://github.com/cabaletta/baritone) (Fabric version)
-4. Place `traderun-0.9.5.jar` in your `.minecraft/mods/` folder
-5. Launch Minecraft!
+4. Download and install [AutoTrade](https://modrinth.com/mod/autotrade) (for trade whitelisting)
+5. Place `traderun-1.0.7.jar` in your `.minecraft/mods/` folder
+6. Launch Minecraft!
 
 ## Quick Start
 
-### 1. Set Up Storage (Required First!)
+### 1. Configure AutoTrade (Required!)
+Set up your trade whitelist in AutoTrade first:
+- Configure which trades you want to do automatically
+- This ensures the bot only trades the items you want
+
+### 2. Set Up Storage (Required!)
 Look at your **input chest** (items you trade TO villagers) and run:
 ```
 /traderun storage set input
@@ -48,14 +59,16 @@ Look at your **output chest** (items you get FROM villagers) and run:
 
 **💡 Tip:** After setting storage, just open the chest and the mod automatically learns what item to look for from the first slot!
 
-### 2. Register Your Floors
+### 3. Register Your Floors
 Stand on a floor with villagers and run:
 ```
 /traderun floor add <name> <profession>
 ```
 Example: `/traderun floor add clerics cleric`
 
-### 3. Start Trading!
+**💡 Tab Completion:** Press Tab after `<profession>` to see all available villager professions!
+
+### 4. Start Trading!
 ```
 /traderun start <floor_name>
 ```
@@ -65,6 +78,10 @@ Or trade multiple floors:
 ```
 /traderun start clerics toolsmiths
 ```
+
+**🎯 Background Mode:** Once started, you can tab out to other applications - the bot keeps trading!
+
+**⏸️ Manual Pause:** Press ESC while running for a 10-second countdown to tab out, then auto-resumes.
 
 ## Commands Reference
 
@@ -89,16 +106,18 @@ Or trade multiple floors:
 | Command | Description |
 |---------|-------------|
 | `/traderun floor add <name> <profession>` | Register floor with name & profession |
-| `/traderun floor del` | Delete current floor |
+| `/traderun floor del <name>` | Delete floor by name |
+| `/traderun floor rescan` | Rescan current floor for villagers |
 | `/traderun floor list` | List all registered floors |
 
 ### Settings Commands
 | Command | Description |
 |---------|-------------|
-| `/traderun set inputmin <count>` | Minimum input items before restocking |
-| `/traderun set outputmin <count>` | Output count to trigger dumping |
-| `/traderun set cooldown <seconds>` | Villager trade cooldown time |
+| `/traderun set inputmin <count>` | Minimum input items before restocking (default: 32) |
+| `/traderun set outputmin <count>` | Output count to trigger dumping (default: 672) |
+| `/traderun set cooldown <seconds>` | Villager trade cooldown time (default: 600) |
 | `/traderun cooldown reset` | Clear all villager cooldowns |
+| `/traderun cooldown clearall` | Force clear ALL cooldowns (emergency) |
 
 ### Debug Commands
 | Command | Description |
@@ -108,21 +127,34 @@ Or trade multiple floors:
 
 ## How It Works
 
+The bot operates in a sophisticated state machine:
+
 1. **SEEK** — Finds nearest eligible villager on the current floor
-2. **APPROACH** — Navigates to a position where you can interact
-3. **TRADE** — Opens trade GUI (uses your AutoTrade mod settings)
-4. **WAIT** — Waits for trade cooldown
-5. **RESTOCK/DUMP** — Goes to storage when needed
-6. **FLOOR SWITCH** — Changes floors when all villagers are on cooldown
+2. **APPROACH** — Uses Baritone for advanced pathfinding to reach villager interaction points
+3. **TRADE** — Opens trade GUI (requires AutoTrade mod for whitelisted trades)
+4. **COOLDOWN** — Waits for villager restock (detects happy villager particles + timer fallback)
+5. **RESTOCK/DUMP** — Intelligently manages inventory, skips unnecessary dumps for multi-floor setups
+6. **FLOOR TRANSITION** — Seamlessly navigates between Y-levels with edge detection
+7. **BACKGROUND MODE** — Continues operation even when Minecraft window is unfocused
+8. **QUEUE DETECTION** — Automatically pauses during server queues and resumes when clear
+
+**Visual Indicators:**
+- 🔴 **Red Pumpkin Heads** — Villagers currently on cooldown
+- 🟢 **Green Markers** — Input storage chests
+- 🔴 **Red Markers** — Output storage chests
 
 ## Tips
 
-- **AutoTrade Setup**: Configure your trade whitelist in your mod client's AutoTrade feature BEFORE running Traderun
-- **Item Learning**: Just open your input/output chests once — the mod learns what items to look for from slot 1
-- **Storage Per Floor**: Each Y-level can have its own input/output chests with different items
-- **Don't Stand on Trading Blocks**: The bot avoids stepping on blocks taller than carpet
-- **Villager Cooldowns**: Villagers need ~2 minutes between trades to restock
-- **Floor Navigation**: No need to set transition points — the bot uses Baritone to navigate between floors
+- **AutoTrade Setup**: Configure your trade whitelist in AutoTrade BEFORE running TradeRun - required for trading!
+- **Background Operation**: Tab out to other apps while trading - the bot continues automatically
+- **ESC Pause**: Press ESC for 10-second countdown to safely tab out, then auto-resumes
+- **Item Learning**: Open input/output chests once — the mod remembers items forever
+- **Multi-Floor Optimization**: Output items skip dumping if they're the input for the next floor
+- **Visual Indicators**: Look for red pumpkin heads on cooldown villagers
+- **Queue Detection**: Bot automatically pauses during server queues (0,0 coordinate detection)
+- **Edge Protection**: Bot won't walk off platforms thanks to advanced edge detection
+- **Night Cooldowns**: During night time, villagers take longer to restock (configurable)
+- **Storage Per Floor**: Each Y-level can have different input/output items and locations
 
 ## Troubleshooting
 
@@ -142,11 +174,24 @@ Then open your input chest to re-learn the correct item.
 - Verify floor is registered with `/traderun floor list`
 
 ### Navigation not working
-- Make sure Baritone is installed
+- Make sure Baritone is installed and configured
 - Try `/traderun debug t` to test pathfinding
+- Check for obstacles blocking villager access
 
 ### Fell off platform
-The bot will automatically navigate back to the floor using your storage chest location as a waypoint.
+The bot has advanced edge detection and won't walk off platforms. If it does fall, it will automatically navigate back using Baritone.
+
+### ESC menu keeps opening
+This is normal when tabbing out - the bot blocks auto-pause but allows manual ESC with countdown.
+
+### Bot not trading in background
+Make sure you're running on a server that allows background operation. Single-player should work fine.
+
+### Queue detection not working
+The bot detects queues at coordinates 0,0 with a 10-block radius tolerance.
+
+### Red pumpkin heads not showing
+Cooldown villagers show red pumpkin textures client-side only (doesn't affect server).
 
 ## Config Files
 
@@ -156,13 +201,18 @@ All settings are saved in `.minecraft/config/traderun/`:
 - `floors.json` — Registered floor data
 - `cooldowns.json` — Villager cooldown timers
 
-## What's New in 0.9.5
+## What's New in v1.0.7
 
-- ✨ **Auto item learning** — Open a registered storage chest and it remembers the item!
-- 🚀 **No transition points needed** — Bot navigates between floors automatically
-- 🛡️ **Better fall recovery** — Automatically returns to floor if you fall off
-- 📋 **Enhanced storage list** — Shows remembered items per floor
-- 🧹 **Code cleanup** — Removed unused code, fixed warnings
+- 🎯 **Background Operation** — Trade while tabbed out to other applications
+- ⏸️ **ESC Pause System** — 10-second countdown when manually pressing ESC
+- 👁️ **Visual Indicators** — Red pumpkin heads on cooldown villagers, colored storage markers
+- 🛡️ **Edge Detection** — Prevents walking off platforms with hole detection
+- 📊 **Queue Detection** — Automatic pause/resume during server queues
+- 🌙 **Night Cooldowns** — Villagers restock slower at night (configurable)
+- 🔄 **Smart Multi-Floor** — Skips unnecessary dumps when output matches next floor input
+- 📋 **Enhanced Commands** — Tab completion, floor rescanning, emergency cooldown clearing
+- 🐛 **Navigation Fixes** — Improved pathfinding, stuck detection, and recovery
+- ⚙️ **Better Defaults** — Optimized inventory thresholds and cooldown settings
 
 ## License
 

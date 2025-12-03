@@ -3,11 +3,11 @@
   "package": "com.example.traderun.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
-    "ParticlePacketMixin"
+    "VillagerRendererMixin",
+    "GameMenuBypassMixin",
+    "GameMenuScreenMixin"
   ],
   "injectors": {
     "defaultRequire": 1
   }
 }
-
-

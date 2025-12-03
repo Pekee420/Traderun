@@ -152,6 +152,13 @@ public class ApproachUtil {
             return false;
         }
 
+        // Reject problematic partial blocks that cause navigation issues
+        String blockId = net.minecraft.registry.Registries.BLOCK.getId(floorState.getBlock()).toString();
+        if (blockId.contains("brewing_stand") || blockId.contains("cauldron") || 
+            blockId.contains("bed") || blockId.contains("composter")) {
+            return false;  // These blocks cause navigation problems in tight spaces
+        }
+
         // Walkway must NOT be a solid full block
         if (walkState.isSolidBlock(world, walkwayPos)) {
             return false;

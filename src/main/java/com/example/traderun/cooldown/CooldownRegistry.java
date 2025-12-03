@@ -7,8 +7,6 @@ import com.google.gson.reflect.TypeToken;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.passive.VillagerEntity;
-import net.minecraft.particle.ParticleTypes;
-import net.minecraft.util.math.Box;
 
 import java.io.IOException;
 import java.io.Reader;
@@ -66,9 +64,6 @@ public final class CooldownRegistry {
     private static final Map<UUID, CooldownEntry> cooldowns = new HashMap<>();
     
     static { load(); }  // Load on class init
-
-    // Particle pacing (~0.8s)
-    private static long nextParticleMs = 0L;
 
     /** Check if it's currently day in the world */
     public static boolean isDayTime(MinecraftClient client) {
@@ -169,23 +164,8 @@ public final class CooldownRegistry {
                 }
             }
         }
-
-        if (now < nextParticleMs) return;
-        nextParticleMs = now + 800L;
-
-        // Only show cooled villagers near you (local-only)
-        double r = 32.0;
-        Box box = client.player.getBoundingBox().expand(r, r, r);
-
-        for (VillagerEntity v : client.world.getEntitiesByClass(VillagerEntity.class, box, VillagerEntity::isAlive)) {
-            if (!isOnCooldown(v)) continue;
-
-            double x = v.getX();
-            double y = v.getY() + v.getHeight() + 0.2;
-            double z = v.getZ();
-
-            client.world.addParticle(ParticleTypes.NOTE, x, y, z, 0.0, 0.0, 0.0);
-        }
+        
+        // Visual markers are now handled by TradeRunVisuals
     }
 
     public static void reset() {

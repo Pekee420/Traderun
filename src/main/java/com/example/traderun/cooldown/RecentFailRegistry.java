@@ -13,8 +13,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class RecentFailRegistry {
 
-    private static final long FAIL_MS = 5_000L; // 5 seconds - try others, come back
-    private static final long SECOND_FAIL_MS = 15_000L; // 15 seconds - skip for a bit longer on repeated failure
+    private static final long FAIL_MS = 3_000L; // 3 seconds - quick retry after trying others
+    private static final long SECOND_FAIL_MS = 8_000L; // 8 seconds - skip briefly on repeated failure
     
     private static final Map<UUID, Long> UNTIL_MS = new ConcurrentHashMap<>();
     

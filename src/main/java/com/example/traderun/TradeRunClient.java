@@ -5,6 +5,7 @@ import com.example.traderun.cooldown.CooldownRegistry;
 import com.example.traderun.cooldown.RestockWatcher;
 import com.example.traderun.runtime.TradeRunRuntime;
 import com.example.traderun.storage.StorageLearner;
+import com.example.traderun.visual.TradeRunVisuals;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -27,10 +28,14 @@ public final class TradeRunClient implements ClientModInitializer {
             TradeRunRuntime.get().tick(client);
             CooldownRegistry.tick(client);
             RestockWatcher.tick(client);
+            TradeRunVisuals.tick(client);
             
             // Learn items from storage containers even when bot is not running
             StorageLearner.tick(client);
         });
+        
+        // Register world render event for 3D markers
+        TradeRunVisuals.register();
     }
 }
 

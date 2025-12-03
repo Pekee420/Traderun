@@ -3,8 +3,8 @@
   "id": "traderun",
   "version": "${version}",
   "name": "Traderun",
-  "description": "Automatic villager trading hall automation. Features: Multi-floor trading, auto-restocking from input chests, auto-dumping to output chests, smart cooldowns (day/night aware), profession filtering. Requires Baritone for pathfinding. Set up your AutoTrade whitelist before using!",
-  "authors": ["Pekee"],
+  "description": "Autonomous bot for villager trading halls. Handles multi-floor setups, automatic restocking/dumping, smart cooldowns (day/night aware), and profession filtering. Requires Baritone (pathfinding) and AutoTrade mod (trading whitelist).",
+  "authors": ["Pekee420"],
   "license": "AGPL-3.0-or-later",
   "icon": "assets/traderun/icon.png",
   "environment": "client",
@@ -30,7 +30,6 @@
     "cloth-config2": "*"
   },
   "contact": {
-    "sources": "https://github.com/pekee/traderun"
+    "sources": "https://github.com/Pekee420/TradeRun"
   }
 }
-

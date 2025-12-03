@@ -158,6 +158,31 @@ public class VillagerFinder {
         return findBestTarget(client).isEmpty();
     }
     
+    /**
+     * Find any nearest villager regardless of profession, cooldown, or floor.
+     * Used as a navigation waypoint when stuck trying to reach storage.
+     */
+    public Optional<VillagerEntity> findAnyNearestVillager(MinecraftClient client) {
+        if (client == null || client.world == null || client.player == null) return Optional.empty();
+        
+        Box box = client.player.getBoundingBox().expand(SCAN_RADIUS, SCAN_RADIUS, SCAN_RADIUS);
+        
+        VillagerEntity nearest = null;
+        double nearestDist = Double.POSITIVE_INFINITY;
+        
+        for (VillagerEntity v : client.world.getEntitiesByClass(VillagerEntity.class, box, VillagerEntity::isAlive)) {
+            if (v.isBaby()) continue;
+            
+            double dist = client.player.squaredDistanceTo(v);
+            if (dist < nearestDist) {
+                nearestDist = dist;
+                nearest = v;
+            }
+        }
+        
+        return Optional.ofNullable(nearest);
+    }
+    
     private boolean isEligible(VillagerEntity v) {
         if (v.isBaby()) return false;
         if (v.isSleeping()) return false;
