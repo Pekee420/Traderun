@@ -22,6 +22,7 @@ public final class TradeRunSettings {
     public int cooldownSec = 600; // 10 minutes default cooldown
     public boolean nightCooldownEnabled = true; // Extend cooldown through night
     public int storageTimeoutSec = 60; // Time to wait for storage navigation before giving up
+    public int maxNoTradeTimeMinutes = 20; // Maximum time to wait when all villagers on cooldown
 
     // Optional tunables (safe defaults)
     public float yawPerTick = 8.0f;
@@ -70,6 +71,10 @@ public final class TradeRunSettings {
 
     public long getCooldownMs() {
         return cooldownSec * 1000L;
+    }
+
+    public long getMaxNoTradeTimeoutMs() {
+        return maxNoTradeTimeMinutes * 60L * 1000L;
     }
 }
 

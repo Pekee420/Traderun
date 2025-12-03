@@ -116,6 +116,8 @@ Or trade multiple floors:
 | `/traderun set inputmin <count>` | Minimum input items before restocking (default: 32) |
 | `/traderun set outputmin <count>` | Output count to trigger dumping (default: 672) |
 | `/traderun set cooldown <seconds>` | Villager trade cooldown time (default: 600) |
+| `/traderun set storageTimeout <seconds>` | Storage navigation timeout (default: 60) |
+| `/traderun set noTradeTimer <minutes>` | Max wait time when all villagers on cooldown (default: 20) |
 | `/traderun cooldown reset` | Clear all villager cooldowns |
 | `/traderun cooldown clearall` | Force clear ALL cooldowns (emergency) |
 

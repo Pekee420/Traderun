@@ -423,6 +423,30 @@ public final class TradeRunCommands {
                                                     TradeRunSettings.saveQuiet();
                                                     msg("storageTimeout=" + sec + "s (bot waits this long when navigating to chests)");
                                                     return 1;
+                                                })))
+                                .then(literal("noTradeTimer")
+                                        .then(argument("time", StringArgumentType.greedyString())
+                                                .executes(ctx -> {
+                                                    String timeStr = StringArgumentType.getString(ctx, "time");
+                                                    try {
+                                                        int minutes;
+                                                        if (timeStr.endsWith("m")) {
+                                                            minutes = Integer.parseInt(timeStr.substring(0, timeStr.length() - 1));
+                                                        } else {
+                                                            minutes = Integer.parseInt(timeStr);
+                                                        }
+                                                        if (minutes < 1 || minutes > 120) {
+                                                            msg("noTradeTimer must be between 1-120 minutes");
+                                                            return 0;
+                                                        }
+                                                        TradeRunSettings.get().maxNoTradeTimeMinutes = minutes;
+                                                        TradeRunSettings.saveQuiet();
+                                                        msg("noTradeTimer=" + minutes + "m (maximum wait time when all villagers are on cooldown)");
+                                                        return 1;
+                                                    } catch (NumberFormatException e) {
+                                                        msg("Invalid format. Use: /traderun set noTradeTimer 20 or /traderun set noTradeTimer 20m");
+                                                        return 0;
+                                                    }
                                                 }))))
 
                         // /traderun debug - saves last 30 debug lines to file
@@ -663,8 +687,13 @@ public final class TradeRunCommands {
         helpMsg("");
         helpMsg("§e§lCooldown:§r");
         helpMsg("§f/traderun set cooldownSec <seconds>");
-        helpMsg("§7Max time before re-trading (default: 840s/14min)");
+        helpMsg("§7Max time before re-trading (default: 600s/10min)");
         helpMsg("§7Note: Villagers are cleared early when restock particles detected");
+        helpMsg("");
+        helpMsg("§e§lNo-trade timeout:§r");
+        helpMsg("§f/traderun set noTradeTimer <minutes>");
+        helpMsg("§7Max wait time when all villagers on cooldown (default: 20m)");
+        helpMsg("§7Bot stops after this time if no cooldowns clear");
         helpMsg("");
         helpMsg("§7Settings saved to config/traderun/settings.json");
     }

@@ -1332,7 +1332,7 @@ public class TradeRunStateMachine {
     private long nextCooldownRestockMs = 0L; // Cooldown for restocking while waiting on villager cooldowns
     private boolean shownCooldownHint = false; // Only show "all on cooldown" hint once per session
     private long allOnCooldownStartMs = 0L; // When we first detected all villagers on cooldown
-    private static final long COOLDOWN_WAIT_TIMEOUT_MS = 10 * 60 * 1000L; // 10 minutes
+    // Timeout for waiting when all villagers are on cooldown (now configurable)
     
     // Waiting mode - check storage periodically for up to 10 minutes
     private static final long WAIT_TIMEOUT_MS = 10 * 60 * 1000L; // 10 minutes
@@ -2169,7 +2169,7 @@ public class TradeRunStateMachine {
                 }
                 
                 long elapsed = currentTimeMs - allOnCooldownStartMs;
-                long remaining = COOLDOWN_WAIT_TIMEOUT_MS - elapsed;
+                long remaining = TradeRunSettings.get().getMaxNoTradeTimeoutMs() - elapsed;
                 
                 if (remaining <= 0) {
                     // 10 minutes passed, no cooldowns cleared - stop
