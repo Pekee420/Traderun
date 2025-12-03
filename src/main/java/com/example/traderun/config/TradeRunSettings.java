@@ -21,6 +21,7 @@ public final class TradeRunSettings {
     public int clickRateMs = 170;
     public int cooldownSec = 600; // 10 minutes default cooldown
     public boolean nightCooldownEnabled = true; // Extend cooldown through night
+    public int storageTimeoutSec = 60; // Time to wait for storage navigation before giving up
 
     // Optional tunables (safe defaults)
     public float yawPerTick = 8.0f;

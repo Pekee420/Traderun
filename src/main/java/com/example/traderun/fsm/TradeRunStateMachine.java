@@ -67,8 +67,14 @@ public class TradeRunStateMachine {
 
     private static final long OPEN_TIMEOUT_MS = 7000L;
     private static final long APPROACH_TIMEOUT_MS = 8000L;
-    private static final long STORAGE_NAV_TIMEOUT_MS = 12000L;  // Total timeout for storage runs
-    private static final long STORAGE_RETRY_VIA_VILLAGER_MS = 8000L;  // Try via villager after 8s
+    // Storage timeouts - now configurable via /traderun set storageTimeout
+    private long getStorageNavTimeoutMs() {
+        return TradeRunSettings.get().storageTimeoutSec * 1000L;
+    }
+    private long getStorageRetryViaVillagerMs() {
+        // Try villager fallback at 75% of total timeout
+        return (long)(TradeRunSettings.get().storageTimeoutSec * 750L);
+    }
 
     private static final long USE_PRESS_MS = 80L;
     private static final long AIM_DELAY_MS = 80L;
@@ -1258,7 +1264,7 @@ public class TradeRunStateMachine {
             long elapsed = System.currentTimeMillis() - approachStartMs;
             
             // After 4s, try going to nearest villager first then retry
-            if (!storageRetryViaVillager && elapsed > STORAGE_RETRY_VIA_VILLAGER_MS) {
+            if (!storageRetryViaVillager && elapsed > getStorageRetryViaVillagerMs()) {
                 Optional<VillagerEntity> nearestVillager = villagerFinder.findAnyNearestVillager(client);
                 if (nearestVillager.isPresent()) {
                     dbg("restock: stuck for 8s, going to villager first then retry");
@@ -1283,7 +1289,7 @@ public class TradeRunStateMachine {
                 return;
             }
             
-            if (elapsed > STORAGE_NAV_TIMEOUT_MS) {
+            if (elapsed > getStorageNavTimeoutMs()) {
                 navigator.stop();
                 String dist = String.format("%.1f", Math.sqrt(dGoal));
                 dbg("restock nav timeout: couldn't reach input chest in 12s, dist=" + dist);
@@ -1505,7 +1511,7 @@ public class TradeRunStateMachine {
             long elapsed = System.currentTimeMillis() - approachStartMs;
             
             // After 4s, try going to nearest villager first then retry
-            if (!storageRetryViaVillager && elapsed > STORAGE_RETRY_VIA_VILLAGER_MS) {
+            if (!storageRetryViaVillager && elapsed > getStorageRetryViaVillagerMs()) {
                 Optional<VillagerEntity> nearestVillager = villagerFinder.findAnyNearestVillager(client);
                 if (nearestVillager.isPresent()) {
                     dbg("dump: stuck for 8s, going to villager first then retry");
@@ -1530,7 +1536,7 @@ public class TradeRunStateMachine {
                 return;
             }
             
-            if (elapsed > STORAGE_NAV_TIMEOUT_MS) {
+            if (elapsed > getStorageNavTimeoutMs()) {
                 navigator.stop();
                 String dist = String.format("%.1f", Math.sqrt(dGoal));
                 dbg("dump nav timeout: couldn't reach output chest in 12s, dist=" + dist);

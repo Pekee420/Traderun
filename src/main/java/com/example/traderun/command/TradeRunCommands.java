@@ -414,6 +414,15 @@ public final class TradeRunCommands {
                                                     TradeRunSettings.saveQuiet();
                                                     msg("cooldownSec=" + sec);
                                                     return 1;
+                                                })))
+                                .then(literal("storageTimeout")
+                                        .then(argument("sec", IntegerArgumentType.integer(10, 300))
+                                                .executes(ctx -> {
+                                                    int sec = IntegerArgumentType.getInteger(ctx, "sec");
+                                                    TradeRunSettings.get().storageTimeoutSec = sec;
+                                                    TradeRunSettings.saveQuiet();
+                                                    msg("storageTimeout=" + sec + "s (bot waits this long when navigating to chests)");
+                                                    return 1;
                                                 }))))
 
                         // /traderun debug - saves last 30 debug lines to file

@@ -325,9 +325,10 @@ public final class Navigator {
             boolean sameFloorGoal = Math.abs(activeGoal.getY() - directWalkStartY) < 1.5;
             if (sameFloorGoal) {
                 double yDiff = playerPos.y - directWalkStartY;
-                // Detect falls early (>0.8 blocks) to stop before going too far
-                // Allow small climbs (0.6) for minor variations but catch stepping on blocks
-                if (yDiff < -0.8 || yDiff > 0.6) {
+                // Strict detection - stop immediately on any Y change
+                // - Fell more than 0.5 blocks (accidental drop)
+                // - Climbed more than 0.4 blocks (walked onto block/slab)
+                if (yDiff < -0.5 || yDiff > 0.4) {
                     stopDirectWalk();
                     lastError = yDiff > 0 ? "climbed onto block" : "Y level dropped";
                     return;
@@ -335,23 +336,26 @@ public final class Navigator {
             }
         }
         
-        // EDGE DETECTION: Check if there's a hole in front of us
+        // PREVENTIVE edge detection - check the block we're about to step onto
+        // Uses player's yaw (facing direction) to check 1 block ahead
         if (!allowYLevelChanges && client.world != null) {
-            double gx = activeGoal.getX() + 0.5;
-            double gz = activeGoal.getZ() + 0.5;
-            double pdx = gx - playerPos.x;
-            double pdz = gz - playerPos.z;
-            double len = Math.sqrt(pdx * pdx + pdz * pdz);
-            if (len > 0.1) {
-                // Normalize and look 1.5 blocks ahead
-                pdx = pdx / len * 1.5;
-                pdz = pdz / len * 1.5;
-                BlockPos ahead = BlockPos.ofFloored(playerPos.x + pdx, playerPos.y - 0.5, playerPos.z + pdz);
-                BlockPos aheadDown = ahead.down();
-                // If there's no ground ahead, stop walking
-                if (!client.world.getBlockState(aheadDown).isSolid() && !client.world.getBlockState(ahead).isSolid()) {
+            float yaw = client.player.getYaw();
+            double rad = Math.toRadians(yaw + 90); // +90 because Minecraft yaw is weird
+            // Check 0.8 blocks ahead (just before next block)
+            double checkX = playerPos.x + Math.cos(rad) * 0.8;
+            double checkZ = playerPos.z + Math.sin(rad) * 0.8;
+            BlockPos nextStep = BlockPos.ofFloored(checkX, playerPos.y - 0.1, checkZ);
+            BlockPos groundUnder = nextStep.down();
+            
+            // If next step has no ground AND we're not already above it, stop
+            if (!client.world.getBlockState(groundUnder).isSolid() && 
+                !client.world.getBlockState(nextStep).isSolid()) {
+                // Check we're not already past this point
+                BlockPos currentGround = BlockPos.ofFloored(playerPos.x, playerPos.y - 0.1, playerPos.z).down();
+                if (client.world.getBlockState(currentGround).isSolid()) {
+                    // We're on solid ground but next step is a hole - STOP before falling
                     stopDirectWalk();
-                    lastError = "hole detected ahead";
+                    lastError = "edge detected - stopping before fall";
                     return;
                 }
             }
