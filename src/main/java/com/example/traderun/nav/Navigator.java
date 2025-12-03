@@ -327,8 +327,8 @@ public final class Navigator {
                 double yDiff = playerPos.y - directWalkStartY;
                 // Strict detection - stop immediately on any Y change
                 // - Fell more than 0.5 blocks (accidental drop)
-                // - Climbed more than 0.4 blocks (walked onto block/slab)
-                if (yDiff < -0.5 || yDiff > 0.4) {
+                // - Climbed more than 0.6 blocks (walked onto block/slab/stair)
+                if (yDiff < -0.5 || yDiff > 0.6) {
                     stopDirectWalk();
                     lastError = yDiff > 0 ? "climbed onto block" : "Y level dropped";
                     return;
