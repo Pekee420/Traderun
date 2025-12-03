@@ -141,9 +141,9 @@ The bot operates in a sophisticated state machine:
 8. **QUEUE DETECTION** — Automatically pauses during server queues and resumes when clear
 
 **Visual Indicators:**
-- 🔴 **Red Pumpkin Heads** — Villagers currently on cooldown
-- 🟢 **Green Markers** — Input storage chests
-- 🔴 **Red Markers** — Output storage chests
+- 🔴 **Red Heads** — Villagers currently on cooldown
+- 🟢 **Green Particles** — Input storage chests
+- 🔴 **Fire Particles** — Output storage chests
 
 ## Tips
 
@@ -186,14 +186,11 @@ The bot has advanced edge detection and won't walk off platforms. If it does fal
 ### ESC menu keeps opening
 This is normal when tabbing out - the bot blocks auto-pause but allows manual ESC with countdown.
 
-### Bot not trading in background
-Make sure you're running on a server that allows background operation. Single-player should work fine.
-
 ### Queue detection not working
 The bot detects queues at coordinates 0,0 with a 10-block radius tolerance.
 
-### Red pumpkin heads not showing
-Cooldown villagers show red pumpkin textures client-side only (doesn't affect server).
+### Red Heads on Villagers not showing
+Cooldown villagers show red textures client-side only (doesn't affect server).
 
 ## Config Files
 
